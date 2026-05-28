@@ -15,7 +15,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   client = new ClawBotClient(context, db);
   context.subscriptions.push(client);
 
-  // Register chat view provider
+  // Try to restore previous session before registering provider
+  try {
+    const restored = await client.restoreLogin();
+    if (restored) {
+      await client.startPolling();
+    }
+  } catch {
+    // Ignore restore errors — user can log in manually
+  }
+
+  // Register chat view provider (after restore so connected state is correct)
   const provider = new ChatViewProvider(context, client, db);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider),
@@ -50,15 +60,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // Try to restore previous session
-  try {
-    const restored = await client.restoreLogin();
-    if (restored) {
-      await client.startPolling();
-    }
-  } catch {
-    // Ignore restore errors — user can log in manually
-  }
 }
 
 export async function deactivate(): Promise<void> {
