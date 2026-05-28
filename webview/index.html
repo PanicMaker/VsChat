@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+  <div id="login-screen" class="hidden">
+    <div id="login-status">Initializing...</div>
+    <img id="qrcode" class="hidden" alt="Scan QR code with WeChat">
+  </div>
+
+  <div id="chat-container">
+    <div id="messages"></div>
+  </div>
+
+  <div id="input-bar">
+    <button id="attach-btn" title="Send Image">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M4 4l8 8m-8 0l8-8m-8 4h8" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <input type="file" id="file-input" accept="image/*" class="hidden">
+    <input type="text" id="text-input" placeholder="Type a message...">
+    <button id="send-btn">Send</button>
+  </div>
+
+  <div id="lightbox" class="hidden">
+    <img id="lightbox-img" src="" alt="Preview">
+    <button id="lightbox-close">&times;</button>
+  </div>
+</body>
+</html>
