@@ -106,6 +106,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       } else if (msg.command === 'login') {
         vscode.commands.executeCommand('clawbot.login');
+      } else if (msg.command === 'openExternal' && msg.url) {
+        vscode.env.openExternal(vscode.Uri.parse(msg.url));
       } else if (msg.command === 'loadMoreHistory') {
         // Could implement pagination here
       }

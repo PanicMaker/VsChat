@@ -38,11 +38,17 @@
     } else if (msg.type === 2) {
       // Image message
       if (msg.direction === 'received') {
-        // For received images, show a placeholder (CDN images are AES-encrypted)
-        const placeholder = document.createElement('div');
-        placeholder.className = 'image-placeholder';
-        placeholder.textContent = '[Image]';
-        div.appendChild(placeholder);
+        // Show CDN URL as clickable link (CDN images are AES-encrypted, can't decrypt in webview)
+        const link = document.createElement('a');
+        link.href = msg.content;
+        link.target = '_blank';
+        link.className = 'image-link';
+        link.textContent = '[Open image in browser]';
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          vscode.postMessage({ command: 'openExternal', url: msg.content });
+        });
+        div.appendChild(link);
       } else {
         // For sent images, show URL reference
         const placeholder = document.createElement('div');

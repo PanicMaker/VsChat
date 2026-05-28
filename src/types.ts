@@ -48,6 +48,7 @@ export interface WebViewOutbound {
   imagePath?: string; // local file path for images
   imageData?: string; // base64 data URL for images from WebView
   fileName?: string;
+  url?: string;
 }
 
 // Message from extension host to WebView

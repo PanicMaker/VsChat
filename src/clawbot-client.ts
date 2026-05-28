@@ -112,8 +112,37 @@ export class ClawBotClient extends vscode.Disposable {
 
     this._connected = true;
     await this.context.secrets.store('clawbot_token', this.botToken);
+    await this.saveCredentialsToFile();
     this.emitStatus('Login successful');
     this._onLoginSuccess.fire();
+  }
+
+  private async saveCredentialsToFile(): Promise<void> {
+    try {
+      const filePath = path.join(this.context.globalStorageUri.fsPath, 'credentials.json');
+      const data = {
+        token: this.botToken,
+        baseUrl: this.botBaseUrl,
+        savedAt: new Date().toISOString(),
+      };
+      await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2));
+    } catch (err: any) {
+      console.error('[ClawBot] Failed to save credentials file:', err.message);
+    }
+  }
+
+  private async loadCredentialsFromFile(): Promise<{ token: string; baseUrl: string } | null> {
+    try {
+      const filePath = path.join(this.context.globalStorageUri.fsPath, 'credentials.json');
+      const raw = await fs.promises.readFile(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      if (data.token) {
+        return { token: data.token, baseUrl: data.baseUrl || BASE_URL };
+      }
+    } catch {
+      // File doesn't exist or is invalid — that's fine
+    }
+    return null;
   }
 
   private async fetchQrAsBase64(url: string): Promise<string | null> {
@@ -156,13 +185,25 @@ export class ClawBotClient extends vscode.Disposable {
   }
 
   async restoreLogin(): Promise<boolean> {
-    const token = await this.context.secrets.get('clawbot_token');
-    if (token) {
-      this.botToken = token;
+    // Try SecretStorage first
+    const secretToken = await this.context.secrets.get('clawbot_token');
+    if (secretToken) {
+      this.botToken = secretToken;
       this._connected = true;
       this.emitStatus('Restored previous session');
       return true;
     }
+
+    // Fall back to file-based credentials
+    const fileCreds = await this.loadCredentialsFromFile();
+    if (fileCreds) {
+      this.botToken = fileCreds.token;
+      this.botBaseUrl = fileCreds.baseUrl;
+      this._connected = true;
+      this.emitStatus('Restored previous session (file)');
+      return true;
+    }
+
     return false;
   }
 
@@ -379,7 +420,14 @@ export class ClawBotClient extends vscode.Disposable {
     this.stopPolling();
     this._connected = false;
     this.botToken = '';
+    this.botBaseUrl = BASE_URL;
     await this.context.secrets.delete('clawbot_token');
+    try {
+      const filePath = path.join(this.context.globalStorageUri.fsPath, 'credentials.json');
+      await fs.promises.unlink(filePath);
+    } catch {
+      // File doesn't exist — that's fine
+    }
   }
 
   dispose(): void {
