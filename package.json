@@ -1,0 +1,80 @@
+{
+  "name": "vscode-clawbot",
+  "displayName": "WeChat ClawBot",
+  "description": "Chat with WeChat contacts via ClawBot iLink protocol",
+  "version": "0.1.0",
+  "publisher": "clawbot",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "clawbot",
+          "title": "WeChat ClawBot",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "clawbot": [
+        {
+          "type": "webview",
+          "id": "clawbot.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "clawbot.login",
+        "title": "ClawBot: Login"
+      },
+      {
+        "command": "clawbot.clearHistory",
+        "title": "ClawBot: Clear Chat History"
+      },
+      {
+        "command": "clawbot.disconnect",
+        "title": "ClawBot: Disconnect"
+      }
+    ],
+    "configuration": {
+      "title": "WeChat ClawBot",
+      "properties": {
+        "clawbot.proxyUrl": {
+          "type": "string",
+          "default": "",
+          "description": "HTTP proxy URL (e.g., http://proxy.example.com:8080). Leave empty to use system proxy."
+        },
+        "clawbot.fromUserId": {
+          "type": "string",
+          "default": "",
+          "description": "WeChat contact ID to chat with (e.g., o9cq800kum_xxx@im.wechat). Leave empty to auto-detect."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "sql.js": "^1.10.3",
+    "markdown-it": "^14.0.0",
+    "node-fetch": "^3.3.2",
+    "https-proxy-agent": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/markdown-it": "^14.0.0",
+    "@types/node": "^20.0.0",
+    "@types/node-fetch": "^2.6.9",
+    "typescript": "^5.3.0"
+  }
+}
