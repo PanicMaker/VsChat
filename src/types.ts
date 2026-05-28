@@ -1,0 +1,80 @@
+// iLink API message types
+export const MsgType = {
+  Text: 1,
+  Image: 2,
+  Voice: 3,
+  File: 4,
+  Video: 5,
+} as const;
+
+export type MsgTypeValue = (typeof MsgType)[keyof typeof MsgType];
+
+// Item in a message's item_list
+export interface MsgItem {
+  type: number;
+  text_item?: { text: string };
+  image_item?: { aes_key: string; cdn_url: string; width?: number; height?: number };
+  voice_item?: { transcription: string };
+  file_item?: { file_name: string; file_size: number; cdn_url: string };
+  video_item?: { aes_key: string; cdn_url: string };
+}
+
+// Raw message from iLink API
+export interface ILinkMessage {
+  from_user_id: string;
+  to_user_id: string;
+  message_type: number;
+  message_state: number;
+  context_token: string;
+  item_list: MsgItem[];
+}
+
+// Internal message representation for UI and storage
+export interface ChatMessage {
+  id: number;
+  direction: 'sent' | 'received';
+  type: MsgTypeValue;
+  content: string;
+  timestamp: number;
+  context_token: string;
+  from_user_id: string;
+  to_user_id: string;
+}
+
+// Message from WebView to extension host
+export interface WebViewOutbound {
+  command: string;
+  text?: string;
+  imagePath?: string; // local file path for images
+  imageData?: string; // base64 data URL for images from WebView
+  fileName?: string;
+}
+
+// Message from extension host to WebView
+export interface WebViewInbound {
+  command: string;
+  message?: ChatMessage;
+  messages?: ChatMessage[];
+  qrcode?: string; // base64 or URL of QR code image
+  status?: string; // login status text
+  error?: string;
+}
+
+// iLink API response shapes
+export interface QRCodeResponse {
+  qrcode: string;
+  qrcode_img_content?: string;
+}
+
+export interface QRCodeStatusResponse {
+  status: 'confirmed' | 'binded_redirect' | 'expired' | 'scaned' | 'need_verifycode' | string;
+  bot_token?: string;
+  baseurl?: string;
+}
+
+export interface GetUpdatesResponse {
+  ret: number;
+  msgs?: ILinkMessage[];
+  get_updates_buf: string;
+  longpolling_timeout_ms: number;
+}
