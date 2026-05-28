@@ -51,13 +51,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   // Try to restore previous session
-  const restored = await client.restoreLogin();
-  if (restored) {
-    await client.startPolling();
+  try {
+    const restored = await client.restoreLogin();
+    if (restored) {
+      await client.startPolling();
+    }
+  } catch {
+    // Ignore restore errors — user can log in manually
   }
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
   client?.dispose();
-  db?.close();
+  await db?.close();
 }
