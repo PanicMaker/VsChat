@@ -68,8 +68,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.disposables.push(
       this.client.onLoginSuccess(async () => {
-        const messages = await this.db.getRecentMessages(100);
-        this.postMessage({ command: 'loadHistory', messages });
+        try {
+          const messages = await this.db.getRecentMessages(100);
+          this.postMessage({ command: 'loadHistory', messages });
+        } catch {
+          // Ignore DB errors on login success — history will load on next panel open
+        }
       })
     );
 
@@ -84,19 +88,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (msg.command === 'sendMessage' && msg.text) {
         await this.client.sendText(msg.text);
       } else if (msg.command === 'sendImage' && msg.imageData) {
-        // Save base64 image to temp file, then send
         const tempDir = path.join(this.context.globalStorageUri.fsPath, 'temp');
         fs.mkdirSync(tempDir, { recursive: true });
         const tempPath = path.join(tempDir, `img_${Date.now()}.png`);
 
-        // Remove data URL prefix
+        // Remove data URL prefix and validate size (max 10MB)
         const base64Data = msg.imageData.replace(/^data:image\/\w+;base64,/, '');
-        fs.writeFileSync(tempPath, Buffer.from(base64Data, 'base64'));
+        if (base64Data.length > 10 * 1024 * 1024) {
+          throw new Error('Image too large (max 10MB)');
+        }
 
-        await this.client.sendImage(tempPath);
-
-        // Clean up temp file
-        try { fs.unlinkSync(tempPath); } catch {}
+        try {
+          fs.writeFileSync(tempPath, Buffer.from(base64Data, 'base64'));
+          await this.client.sendImage(tempPath);
+        } finally {
+          try { fs.unlinkSync(tempPath); } catch {}
+        }
       } else if (msg.command === 'login') {
         vscode.commands.executeCommand('clawbot.login');
       } else if (msg.command === 'loadMoreHistory') {
@@ -132,7 +139,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline'; img-src ${webview.cspSource} data: https:;">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} data: https:;">
         <link href="${stylesUri}" rel="stylesheet">
       </head>
       <body>
@@ -153,13 +160,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <img id="lightbox-img" src="" alt="Preview">
           <button id="lightbox-close">&times;</button>
         </div>
-        <script>
-          const vscode = acquireVsCodeApi();
-          const scriptUri = "${scriptUri}";
-          const script = document.createElement('script');
-          script.src = scriptUri;
-          document.body.appendChild(script);
-        </script>
+        <script src="${scriptUri}"></script>
       </body>
       </html>
     `;
@@ -167,5 +168,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   dispose(): void {
     this.disposables.forEach((d) => d.dispose());
+    this.view = null;
   }
 }
