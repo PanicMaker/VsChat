@@ -1,0 +1,171 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import { ClawBotClient } from './clawbot-client';
+import { ChatDB } from './chat-db';
+import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
+
+export class ChatViewProvider implements vscode.WebviewViewProvider {
+  public static readonly viewType = 'clawbot.chatView';
+
+  private view: vscode.WebviewView | null = null;
+  private disposables: vscode.Disposable[] = [];
+
+  constructor(
+    private context: vscode.ExtensionContext,
+    private client: ClawBotClient,
+    private db: ChatDB
+  ) {}
+
+  resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ): void {
+    this.view = webviewView;
+
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.context.extensionUri, 'webview'),
+      ],
+    };
+
+    webviewView.webview.html = this.getHtml();
+
+    // Handle messages from WebView
+    this.disposables.push(
+      webviewView.webview.onDidReceiveMessage(async (msg: WebViewOutbound) => {
+        await this.handleWebViewMessage(msg);
+      })
+    );
+
+    // Subscribe to client events
+    this.disposables.push(
+      this.client.onMessage(async (chatMsg: ChatMessage) => {
+        this.postMessage({ command: 'newMessage', message: chatMsg });
+
+        if (chatMsg.direction === 'received') {
+          vscode.window.showInformationMessage(
+            `WeChat: ${chatMsg.type === 1 ? chatMsg.content : '[Image]'}`,
+            { modal: false }
+          );
+        }
+      })
+    );
+
+    this.disposables.push(
+      this.client.onStatus((status: string) => {
+        this.postMessage({ command: 'status', status });
+      })
+    );
+
+    this.disposables.push(
+      this.client.onQrCode((data: string) => {
+        this.postMessage({ command: 'qrcode', qrcode: data });
+      })
+    );
+
+    this.disposables.push(
+      this.client.onLoginSuccess(async () => {
+        const messages = await this.db.getRecentMessages(100);
+        this.postMessage({ command: 'loadHistory', messages });
+      })
+    );
+
+    // Load history if already connected
+    if (this.client.connected) {
+      this.loadHistory();
+    }
+  }
+
+  private async handleWebViewMessage(msg: WebViewOutbound): Promise<void> {
+    try {
+      if (msg.command === 'sendMessage' && msg.text) {
+        await this.client.sendText(msg.text);
+      } else if (msg.command === 'sendImage' && msg.imageData) {
+        // Save base64 image to temp file, then send
+        const tempDir = path.join(this.context.globalStorageUri.fsPath, 'temp');
+        fs.mkdirSync(tempDir, { recursive: true });
+        const tempPath = path.join(tempDir, `img_${Date.now()}.png`);
+
+        // Remove data URL prefix
+        const base64Data = msg.imageData.replace(/^data:image\/\w+;base64,/, '');
+        fs.writeFileSync(tempPath, Buffer.from(base64Data, 'base64'));
+
+        await this.client.sendImage(tempPath);
+
+        // Clean up temp file
+        try { fs.unlinkSync(tempPath); } catch {}
+      } else if (msg.command === 'login') {
+        vscode.commands.executeCommand('clawbot.login');
+      } else if (msg.command === 'loadMoreHistory') {
+        // Could implement pagination here
+      }
+    } catch (err: any) {
+      this.postMessage({ command: 'error', error: err.message });
+    }
+  }
+
+  async loadHistory(): Promise<void> {
+    const messages = await this.db.getRecentMessages(100);
+    this.postMessage({ command: 'loadHistory', messages });
+  }
+
+  async clearHistory(): Promise<void> {
+    await this.db.clearAll();
+    this.postMessage({ command: 'clearHistory' });
+  }
+
+  private postMessage(msg: WebViewInbound): void {
+    this.view?.webview.postMessage(msg);
+  }
+
+  private getHtml(): string {
+    const webview = this.view!.webview;
+    const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'webview', 'styles.css'));
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'webview', 'main.js'));
+
+    return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline'; img-src ${webview.cspSource} data: https:;">
+        <link href="${stylesUri}" rel="stylesheet">
+      </head>
+      <body>
+        <div id="login-screen" class="hidden">
+          <div id="login-status">Initializing...</div>
+          <img id="qrcode" class="hidden" alt="Scan QR code">
+        </div>
+        <div id="chat-container">
+          <div id="messages"></div>
+        </div>
+        <div id="input-bar">
+          <button id="attach-btn" title="Send Image">&#x1F4CE;</button>
+          <input type="file" id="file-input" accept="image/*" class="hidden">
+          <input type="text" id="text-input" placeholder="Type a message...">
+          <button id="send-btn">Send</button>
+        </div>
+        <div id="lightbox" class="hidden">
+          <img id="lightbox-img" src="" alt="Preview">
+          <button id="lightbox-close">&times;</button>
+        </div>
+        <script>
+          const vscode = acquireVsCodeApi();
+          const scriptUri = "${scriptUri}";
+          const script = document.createElement('script');
+          script.src = scriptUri;
+          document.body.appendChild(script);
+        </script>
+      </body>
+      </html>
+    `;
+  }
+
+  dispose(): void {
+    this.disposables.forEach((d) => d.dispose());
+  }
+}
