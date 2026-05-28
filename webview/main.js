@@ -136,10 +136,20 @@
       case 'loadHistory':
         loadHistory(message.messages || []);
         hasPartner = message.messages && message.messages.length > 0;
+        // Transition to chat view
+        loginScreen.classList.add('hidden');
+        chatContainer.classList.remove('hidden');
+        inputBar.classList.remove('hidden');
         break;
 
       case 'newMessage':
         if (message.message) {
+          // If still on login screen, transition to chat
+          if (!loginScreen.classList.contains('hidden')) {
+            loginScreen.classList.add('hidden');
+            chatContainer.classList.remove('hidden');
+            inputBar.classList.remove('hidden');
+          }
           renderMessage(message.message);
           hasPartner = true;
         }

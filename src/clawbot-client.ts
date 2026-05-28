@@ -171,6 +171,7 @@ export class ClawBotClient extends vscode.Disposable {
     this.polling = true;
     this.pollingAbort = new AbortController();
     this.reconnectDelay = 1000;
+    console.log('[ClawBot] Polling started');
     this.pollLoop().catch((err) => {
       this.emitStatus(`Polling error: ${err.message}`);
     });
@@ -180,6 +181,7 @@ export class ClawBotClient extends vscode.Disposable {
     while (this.polling) {
       try {
         const cursor = await this.db.getMetadata('last_cursor') || '';
+        console.log('[ClawBot] Polling getupdates, cursor length:', cursor.length);
         const res = await this.request<GetUpdatesResponse>('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
@@ -188,8 +190,9 @@ export class ClawBotClient extends vscode.Disposable {
           }),
           signal: this.pollingAbort?.signal,
         });
+        console.log('[ClawBot] getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
 
-        if (res.ret === 0 && res.msgs && res.msgs.length > 0) {
+        if (res.msgs && res.msgs.length > 0) {
           await this.processMessages(res.msgs);
         }
 
@@ -199,6 +202,7 @@ export class ClawBotClient extends vscode.Disposable {
 
         this.reconnectDelay = 1000;
       } catch (err: any) {
+        console.log('[ClawBot] Poll error:', err.name, err.message);
         if (err.name === 'AbortError') break;
         this.emitStatus(`Connection lost, retrying in ${this.reconnectDelay / 1000}s...`);
         await this.sleep(this.reconnectDelay);
