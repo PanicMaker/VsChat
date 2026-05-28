@@ -11,7 +11,7 @@ export type MsgTypeValue = (typeof MsgType)[keyof typeof MsgType];
 
 // Item in a message's item_list
 export interface MsgItem {
-  type: number;
+  type: MsgTypeValue;
   text_item?: { text: string };
   image_item?: { aes_key: string; cdn_url: string; width?: number; height?: number };
   voice_item?: { transcription: string };
@@ -23,7 +23,7 @@ export interface MsgItem {
 export interface ILinkMessage {
   from_user_id: string;
   to_user_id: string;
-  message_type: number;
+  message_type: MsgTypeValue;
   message_state: number;
   context_token: string;
   item_list: MsgItem[];
@@ -67,7 +67,7 @@ export interface QRCodeResponse {
 }
 
 export interface QRCodeStatusResponse {
-  status: 'confirmed' | 'binded_redirect' | 'expired' | 'scaned' | 'need_verifycode' | string;
+  status: 'confirmed' | 'binded_redirect' | 'expired' | 'scaned' | 'need_verifycode';
   bot_token?: string;
   baseurl?: string;
 }
