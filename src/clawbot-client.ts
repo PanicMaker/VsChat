@@ -1,8 +1,10 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as path from 'path';
 import { fetch, RequestInit } from 'undici';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import QRCode from 'qrcode';
 import { ChatDB } from './chat-db';
 import {
   ILinkMessage,
@@ -95,7 +97,10 @@ export class ClawBotClient extends vscode.Disposable {
       const qrRes = await this.request<QRCodeResponse>('/ilink/bot/get_bot_qrcode?bot_type=3');
 
       if (qrRes.qrcode_img_content) {
-        this.emitQrCode(qrRes.qrcode_img_content);
+        const base64 = await this.fetchQrAsBase64(qrRes.qrcode_img_content);
+        if (base64) {
+          this.emitQrCode(base64);
+        }
       }
       this.emitStatus('Please scan QR code with WeChat');
 
@@ -109,6 +114,25 @@ export class ClawBotClient extends vscode.Disposable {
     await this.context.secrets.store('clawbot_token', this.botToken);
     this.emitStatus('Login successful');
     this._onLoginSuccess.fire();
+  }
+
+  private async fetchQrAsBase64(url: string): Promise<string | null> {
+    try {
+      // The URL returns HTML, not an image. Extract the qrcode parameter
+      // and generate the QR image ourselves.
+      const match = url.match(/[?&]qrcode=([^&]+)/);
+      const qrcodeParam = match ? match[1] : url;
+
+      const base64 = await QRCode.toDataURL(qrcodeParam, {
+        errorCorrectionLevel: 'M',
+        width: 256,
+        margin: 1,
+      });
+      return base64;
+    } catch (err: any) {
+      console.error('[ClawBot] QR generation error:', err.message);
+      return null;
+    }
   }
 
   private async pollQrStatus(qrcode: string): Promise<boolean> {

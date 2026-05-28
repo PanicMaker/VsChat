@@ -154,7 +154,6 @@
         chatContainer.classList.add('hidden');
         inputBar.classList.add('hidden');
         if (message.qrcode) {
-          // API returns a URL, use directly
           qrcodeImg.src = message.qrcode;
           qrcodeImg.classList.remove('hidden');
         }
