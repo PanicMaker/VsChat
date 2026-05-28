@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import { fetch, RequestInit, Response } from 'undici';
+import { fetch, RequestInit } from 'undici';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ChatDB } from './chat-db';
 import {
@@ -75,7 +75,6 @@ export class ClawBotClient extends vscode.Disposable {
       ...init,
       headers,
       dispatcher: agent,
-      signal: init?.signal || this.pollingAbort?.signal,
     } as RequestInit);
 
     if (!response.ok) {
@@ -129,8 +128,8 @@ export class ClawBotClient extends vscode.Disposable {
         if (status.status === 'expired') {
           return false;
         }
-      } catch {
-        // Ignore errors during polling
+      } catch (err: any) {
+        this.emitStatus(`QR polling error: ${err.message}`);
       }
     }
     return false;
@@ -152,7 +151,9 @@ export class ClawBotClient extends vscode.Disposable {
     this.polling = true;
     this.pollingAbort = new AbortController();
     this.reconnectDelay = 1000;
-    this.pollLoop();
+    this.pollLoop().catch((err) => {
+      this.emitStatus(`Polling error: ${err.message}`);
+    });
   }
 
   private async pollLoop(): Promise<void> {
@@ -165,6 +166,7 @@ export class ClawBotClient extends vscode.Disposable {
             get_updates_buf: cursor,
             base_info: { channel_version: '1.0.2' },
           }),
+          signal: this.pollingAbort?.signal,
         });
 
         if (res.ret === 0 && res.msgs && res.msgs.length > 0) {
@@ -266,7 +268,7 @@ export class ClawBotClient extends vscode.Disposable {
 
     // Generate random AES key
     const aesKey = crypto.randomBytes(16);
-    const fileData = fs.readFileSync(imagePath);
+    const fileData = await fs.promises.readFile(imagePath);
     const encrypted = this.aesEncrypt(fileData, aesKey);
 
     // Get upload URL
@@ -330,6 +332,7 @@ export class ClawBotClient extends vscode.Disposable {
     this._onMessage.fire({ ...chatMsg, id });
   }
 
+  // iLink protocol requires AES-128-ECB for media encryption
   private aesEncrypt(data: Buffer, key: Buffer): Buffer {
     const cipher = crypto.createCipheriv('aes-128-ecb', key, '');
     cipher.setAutoPadding(true);
