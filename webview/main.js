@@ -154,11 +154,8 @@
         chatContainer.classList.add('hidden');
         inputBar.classList.add('hidden');
         if (message.qrcode) {
-          // API returns raw base64, needs data URL prefix
-          const src = message.qrcode.startsWith('data:')
-            ? message.qrcode
-            : `data:image/png;base64,${message.qrcode}`;
-          qrcodeImg.src = src;
+          // API returns a URL, use directly
+          qrcodeImg.src = message.qrcode;
           qrcodeImg.classList.remove('hidden');
         }
         break;
