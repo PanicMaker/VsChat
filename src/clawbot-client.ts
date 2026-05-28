@@ -118,12 +118,8 @@ export class ClawBotClient extends vscode.Disposable {
 
   private async fetchQrAsBase64(url: string): Promise<string | null> {
     try {
-      // The URL returns HTML, not an image. Extract the qrcode parameter
-      // and generate the QR image ourselves.
-      const match = url.match(/[?&]qrcode=([^&]+)/);
-      const qrcodeParam = match ? match[1] : url;
-
-      const base64 = await QRCode.toDataURL(qrcodeParam, {
+      // Generate QR code from the full URL - this is what WeChat needs to scan
+      const base64 = await QRCode.toDataURL(url, {
         errorCorrectionLevel: 'M',
         width: 256,
         margin: 1,
