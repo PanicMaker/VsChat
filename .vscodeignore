@@ -1,7 +1,10 @@
 .vscode/
 .vscode-test/
+.github/
 src/
-webview/
+node_modules/
+docs/
+.claude/
 tsconfig.json
 **/*.ts.map
 **/*.tsbuildinfo

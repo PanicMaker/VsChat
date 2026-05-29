@@ -68,9 +68,13 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "vscode:prepublish": "npm run build",
+    "build": "npm run typecheck && npm run bundle && npm run copy-wasm",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap",
+    "copy-wasm": "cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm 2>/dev/null || true",
+    "typecheck": "tsc -p ./ --noEmit",
+    "compile": "npm run build",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap --watch"
   },
   "dependencies": {
     "https-proxy-agent": "^7.0.2",
@@ -85,6 +89,7 @@
     "@types/qrcode": "^1.5.6",
     "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.85.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.3.0"
   }
 }
