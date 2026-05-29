@@ -3,7 +3,7 @@
   "displayName": "WeChat ClawBot",
   "description": "Chat with WeChat contacts via ClawBot iLink protocol",
   "version": "0.1.0",
-  "publisher": "clawbot",
+  "publisher": "PanicMaker",
   "repository": {
     "type": "git",
     "url": "https://github.com/PanicMaker/VsChat.git"
