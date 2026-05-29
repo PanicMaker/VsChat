@@ -2,8 +2,7 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fetch, RequestInit } from 'undici';
-import { HttpsProxyAgent } from 'https-proxy-agent';
+import { fetch, RequestInit, ProxyAgent } from 'undici';
 import QRCode from 'qrcode';
 import { ChatDB } from './chat-db';
 import {
@@ -56,12 +55,12 @@ export class ClawBotClient extends vscode.Disposable {
     super(() => this.dispose());
   }
 
-  private getProxyAgent(): HttpsProxyAgent<string> | undefined {
+  private getProxyAgent(): ProxyAgent | undefined {
     const config = vscode.workspace.getConfiguration('clawbot');
     const proxyUrl = config.get<string>('proxyUrl') || '';
     const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '';
     const proxy = proxyUrl || envProxy;
-    return proxy ? new HttpsProxyAgent(proxy) : undefined;
+    return proxy ? new ProxyAgent(proxy) : undefined;
   }
 
   private async request<T>(urlPath: string, init?: RequestInit): Promise<T> {
@@ -302,17 +301,26 @@ export class ClawBotClient extends vscode.Disposable {
 
   private async fetchImageAsDataUrl(cdnUrl: string, aesKeyBase64: string): Promise<string | undefined> {
     try {
+      console.log('[ClawBot] fetchImage: cdnUrl=', cdnUrl.substring(0, 80));
+      console.log('[ClawBot] fetchImage: aesKeyBase64=', aesKeyBase64.substring(0, 40));
       // media.aes_key is base64 of a 32-char hex string
       // Decode: base64 → hex string → 16 raw bytes (matching official openclaw-weixin)
       const hexStr = Buffer.from(aesKeyBase64, 'base64').toString('ascii');
+      console.log('[ClawBot] fetchImage: hexStr=', hexStr, 'length=', hexStr.length);
       const key = Buffer.from(hexStr, 'hex');
+      console.log('[ClawBot] fetchImage: key length=', key.length);
       const agent = this.getProxyAgent();
+      console.log('[ClawBot] fetchImage: agent=', agent ? 'proxy set' : 'no proxy');
       const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
+      console.log('[ClawBot] fetchImage: resp.status=', resp.status, 'resp.ok=', resp.ok);
       if (!resp.ok) return undefined;
       const encrypted = Buffer.from(await resp.arrayBuffer());
+      console.log('[ClawBot] fetchImage: encrypted length=', encrypted.length);
       const decrypted = decryptAesEcb(encrypted, key);
+      console.log('[ClawBot] fetchImage: decrypted length=', decrypted.length);
       return `data:image/png;base64,${decrypted.toString('base64')}`;
-    } catch {
+    } catch (err: any) {
+      console.error('[ClawBot] fetchImage error:', err.message, err.stack);
       return undefined;
     }
   }
