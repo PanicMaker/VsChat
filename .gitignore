@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.vscode/
 *.vsix
 *.db
 .vscode-test/
+*.log
