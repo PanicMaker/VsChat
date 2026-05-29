@@ -410,23 +410,41 @@ export class ClawBotClient extends vscode.Disposable {
       throw new Error('No conversation partner — wait for an incoming message first');
     }
 
-    // Generate random AES key
+    // Generate random AES key and file metadata
     const aesKey = crypto.randomBytes(16);
     const fileData = await fs.promises.readFile(imagePath);
     const encrypted = this.aesEncrypt(fileData, aesKey);
+    const fileMd5 = crypto.createHash('md5').update(fileData).digest('hex');
+    const filekey = crypto.randomBytes(16).toString('hex');
 
-    // Get upload URL
-    const uploadUrlRes = await this.request<{ url: string }>('/ilink/bot/getuploadurl', {
+    // Get upload URL with proper parameters (matching official openclaw-weixin)
+    const uploadUrlRes = await this.request<{
+      upload_param: string;
+      thumb_upload_param?: string;
+      filekey?: string;
+      aeskey?: string;
+      upload_url?: string;
+    }>('/ilink/bot/getuploadurl', {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        filekey,
+        media_type: 1,
+        to_user_id: fromId,
+        rawsize: fileData.length,
+        rawfilemd5: fileMd5,
+        filesize: encrypted.length,
+        aeskey: aesKey.toString('hex'),
+        no_need_thumb: true,
+      }),
     });
 
-    if (!uploadUrlRes.url) {
-      throw new Error('Failed to get upload URL');
+    const cdnUrl = uploadUrlRes.upload_url || uploadUrlRes.upload_param;
+    if (!cdnUrl) {
+      throw new Error('Failed to get upload URL: ' + JSON.stringify(uploadUrlRes));
     }
 
     // Upload encrypted file to CDN
-    const uploadResp = await fetch(uploadUrlRes.url, {
+    const uploadResp = await fetch(cdnUrl, {
       method: 'PUT',
       body: encrypted,
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -435,9 +453,14 @@ export class ClawBotClient extends vscode.Disposable {
       throw new Error(`Upload failed: ${uploadResp.status}`);
     }
 
-    const cdnUrl = uploadUrlRes.url;
+    // Get the CDN download URL with encrypted query param from response
+    const downloadEncryptedParam = uploadUrlRes.upload_param || '';
+    const mediaAesKey = aesKey.toString('base64');
 
-    // Send message with image reference
+    // Build the full CDN download URL
+    const fullUrl = `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(downloadEncryptedParam)}`;
+
+    // Send message with image reference (matching official openclaw-weixin format)
     const payload = {
       msg: {
         to_user_id: fromId,
@@ -450,8 +473,12 @@ export class ClawBotClient extends vscode.Disposable {
           {
             type: 2,
             image_item: {
-              aes_key: aesKey.toString('base64'),
-              cdn_url: cdnUrl,
+              aeskey: aesKey.toString('hex'),
+              media: {
+                aes_key: mediaAesKey,
+                full_url: fullUrl,
+                encrypt_query_param: downloadEncryptedParam,
+              },
             },
           },
         ],
@@ -467,7 +494,7 @@ export class ClawBotClient extends vscode.Disposable {
     const chatMsg: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
       type: MsgType.Image,
-      content: cdnUrl,
+      content: fullUrl,
       timestamp: Math.floor(Date.now() / 1000),
       context_token: lastCursor,
       from_user_id: toId,
@@ -480,8 +507,7 @@ export class ClawBotClient extends vscode.Disposable {
 
   // iLink protocol requires AES-128-ECB for media encryption
   private aesEncrypt(data: Buffer, key: Buffer): Buffer {
-    const cipher = crypto.createCipheriv('aes-128-ecb', key, '');
-    cipher.setAutoPadding(true);
+    const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
     return Buffer.concat([cipher.update(data), cipher.final()]);
   }
 
