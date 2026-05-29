@@ -16,6 +16,11 @@ import {
   GetUpdatesResponse,
 } from './types';
 
+function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
+  const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
 const BASE_URL = 'https://ilinkai.weixin.qq.com';
 
 function randomUin(): string {
@@ -306,25 +311,11 @@ export class ClawBotClient extends vscode.Disposable {
       const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
       if (!resp.ok) return undefined;
       const encrypted = Buffer.from(await resp.arrayBuffer());
-      const decrypted = this.aesDecryptImage(encrypted, aesKey);
+      const decrypted = decryptAesEcb(encrypted, aesKey);
       return `data:image/png;base64,${decrypted.toString('base64')}`;
     } catch {
       return undefined;
     }
-  }
-
-  private aesDecryptImage(data: Buffer, key: Buffer): Buffer {
-    const decipher = crypto.createDecipheriv('aes-128-ecb', key, '');
-    decipher.setAutoPadding(true);
-    return Buffer.concat([decipher.update(data), decipher.final()]);
-  }
-
-  private cacheImage(messageId: number, dataUrl: string): void {
-    if (this.imageCache.size >= ClawBotClient.MAX_CACHED_IMAGES) {
-      const oldest = this.imageCache.keys().next().value;
-      if (oldest !== undefined) this.imageCache.delete(oldest);
-    }
-    this.imageCache.set(messageId, dataUrl);
   }
 
   stopPolling(): void {
@@ -347,7 +338,7 @@ export class ClawBotClient extends vscode.Disposable {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
-        client_id: `openclaw-vscode-${Math.random().toString(16).slice(2)}`,
+        client_id: `openclaw-vscode-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
@@ -418,7 +409,7 @@ export class ClawBotClient extends vscode.Disposable {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
-        client_id: `openclaw-vscode-${Math.random().toString(16).slice(2)}`,
+        client_id: `openclaw-vscode-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
