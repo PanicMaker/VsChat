@@ -294,11 +294,13 @@ export class ClawBotClient extends vscode.Disposable {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
+        client_id: `openclaw-vscode-${Math.random().toString(16).slice(2)}`,
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
         item_list: [{ type: 1, text_item: { text } }],
       },
+      base_info: { channel_version: '2.4.3' },
     };
 
     await this.request('/ilink/bot/sendmessage', {
@@ -363,6 +365,7 @@ export class ClawBotClient extends vscode.Disposable {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
+        client_id: `openclaw-vscode-${Math.random().toString(16).slice(2)}`,
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
@@ -376,6 +379,7 @@ export class ClawBotClient extends vscode.Disposable {
           },
         ],
       },
+      base_info: { channel_version: '2.4.3' },
     };
 
     await this.request('/ilink/bot/sendmessage', {
