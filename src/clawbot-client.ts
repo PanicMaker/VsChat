@@ -20,6 +20,10 @@ function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
+function aesEcbPaddedSize(plaintextSize: number): number {
+  return Math.ceil((plaintextSize + 1) / 16) * 16;
+}
+
 const BASE_URL = 'https://ilinkai.weixin.qq.com';
 
 function randomUin(): string {
@@ -413,9 +417,9 @@ export class ClawBotClient extends vscode.Disposable {
     // Generate random AES key and file metadata
     const aesKey = crypto.randomBytes(16);
     const fileData = await fs.promises.readFile(imagePath);
-    const encrypted = this.aesEncrypt(fileData, aesKey);
     const fileMd5 = crypto.createHash('md5').update(fileData).digest('hex');
     const filekey = crypto.randomBytes(16).toString('hex');
+    const filesize = aesEcbPaddedSize(fileData.length);
 
     // Get upload URL with proper parameters (matching official openclaw-weixin)
     const uploadUrlRes = await this.request<{
@@ -433,7 +437,7 @@ export class ClawBotClient extends vscode.Disposable {
         to_user_id: fromId,
         rawsize: fileData.length,
         rawfilemd5: fileMd5,
-        filesize: encrypted.length,
+        filesize: filesize,
         aeskey: aesKey.toString('hex'),
         no_need_thumb: true,
       }),
@@ -444,10 +448,10 @@ export class ClawBotClient extends vscode.Disposable {
       throw new Error('Failed to get upload URL: ' + JSON.stringify(uploadUrlRes));
     }
 
-    // Upload encrypted file to CDN (official uses POST, not PUT)
+    // Upload PLAINTEXT to CDN - CDN encrypts it internally (official pattern)
     const uploadResp = await fetch(uploadUrl, {
       method: 'POST',
-      body: encrypted,
+      body: fileData,
       headers: { 'Content-Type': 'application/octet-stream' },
     });
     if (!uploadResp.ok) {
@@ -462,14 +466,19 @@ export class ClawBotClient extends vscode.Disposable {
     const downloadEncryptedParam = uploadResp.headers.get('x-encrypted-param') || '';
     const mediaAesKey = aesKey.toString('base64');
 
-    // Build the full CDN download URL
+    // Build the full CDN download URL - match incoming message format with taskid
+    const uploadUrlObj = new URL(uploadUrl);
+    const taskid = uploadUrlObj.searchParams.get('taskid') || '';
     const fullUrl = downloadEncryptedParam
-      ? `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(downloadEncryptedParam)}`
+      ? `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(downloadEncryptedParam)}${taskid ? '&taskid=' + taskid : ''}`
       : uploadUrl.replace('/upload', '/download');
 
-    console.log('[ClawBot] Image download URL:', fullUrl.substring(0, 100));
+    console.log('[ClawBot] Image upload: downloadParam length=', downloadEncryptedParam.length);
+    console.log('[ClawBot] Image download URL:', fullUrl.substring(0, 120));
+    console.log('[ClawBot] Image aeskey hex=', aesKey.toString('hex'));
+    console.log('[ClawBot] Image aes_key base64=', mediaAesKey);
 
-    // Send message with image reference (matching official openclaw-weixin format)
+    // Send message with image reference (matching incoming message format)
     const payload = {
       msg: {
         to_user_id: fromId,
@@ -485,15 +494,19 @@ export class ClawBotClient extends vscode.Disposable {
               media: {
                 encrypt_query_param: downloadEncryptedParam,
                 aes_key: mediaAesKey,
+                full_url: fullUrl,
                 encrypt_type: 1,
               },
-              mid_size: encrypted.length,
+              mid_size: filesize,
             },
           },
         ],
       },
       base_info: { channel_version: '2.4.3' },
     };
+
+    console.log('[ClawBot] sendmessage image full payload:', JSON.stringify({ ...payload, msg: { ...payload.msg, item_list: [JSON.stringify(payload.msg.item_list[0])] } }));
+    console.log('[ClawBot] sendmessage image item:', JSON.stringify(payload.msg.item_list[0]));
 
     console.log('[ClawBot] sendmessage image payload:', JSON.stringify(payload, null, 2).substring(0, 500));
 
