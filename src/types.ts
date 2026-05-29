@@ -13,7 +13,7 @@ export type MsgTypeValue = (typeof MsgType)[keyof typeof MsgType];
 export interface MsgItem {
   type: MsgTypeValue;
   text_item?: { text: string };
-  image_item?: { aes_key: string; cdn_url: string; width?: number; height?: number };
+  image_item?: { aeskey: string; media: { aes_key: string; full_url: string; encrypt_query_param?: string }; thumb_size?: number; mid_size?: number; thumb_width?: number; thumb_height?: number };
   voice_item?: { transcription: string };
   file_item?: { file_name: string; file_size: number; cdn_url: string };
   video_item?: { aes_key: string; cdn_url: string };
@@ -59,6 +59,7 @@ export interface WebViewInbound {
   qrcode?: string; // base64 or URL of QR code image
   status?: string; // login status text
   error?: string;
+  imageDataUrl?: string | null; // decrypted image data URL for webview
 }
 
 // iLink API response shapes

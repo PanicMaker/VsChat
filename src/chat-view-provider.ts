@@ -42,8 +42,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // Subscribe to client events
     this.disposables.push(
-      this.client.onMessage(async (chatMsg: ChatMessage) => {
-        this.postMessage({ command: 'newMessage', message: chatMsg });
+      this.client.onMessage(async (chatMsg: ChatMessage & { imageDataUrl?: string }) => {
+        console.log('[provider] onMessage fired:', JSON.stringify({ id: chatMsg.id, type: chatMsg.type, direction: chatMsg.direction, contentLen: chatMsg.content.length, imageDataUrlLen: chatMsg.imageDataUrl?.length ?? 'none' }));
+        this.postMessage({ command: 'newMessage', message: chatMsg, imageDataUrl: chatMsg.imageDataUrl });
 
         if (chatMsg.direction === 'received') {
           vscode.window.showInformationMessage(

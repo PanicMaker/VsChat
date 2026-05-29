@@ -37,22 +37,34 @@
       div.appendChild(textEl);
     } else if (msg.type === 2) {
       // Image message
-      if (msg.direction === 'received') {
-        // Show CDN URL as clickable link (CDN images are AES-encrypted, can't decrypt in webview)
-        const link = document.createElement('a');
-        link.href = msg.content;
-        link.target = '_blank';
-        link.className = 'image-link';
-        link.textContent = '[Open image in browser]';
-        link.addEventListener('click', (e) => {
-          e.preventDefault();
-          vscode.postMessage({ command: 'openExternal', url: msg.content });
+      console.log('[webview] renderMessage image:', JSON.stringify({ id: msg.id, direction: msg.direction, content: msg.content, imageDataUrl: !!msg.imageDataUrl, imageDataUrlType: typeof msg.imageDataUrl }));
+      if (msg.direction === 'received' && msg.imageDataUrl) {
+        // Has decrypted image data — show thumbnail
+        const img = document.createElement('img');
+        img.className = 'message-image';
+        img.src = msg.imageDataUrl;
+        img.alt = 'Message image';
+        img.addEventListener('click', () => {
+          lightboxImg.src = img.src;
+          lightbox.classList.remove('hidden');
         });
-        div.appendChild(link);
-      } else {
-        // For sent images, show URL reference
+        div.appendChild(img);
+      } else if (msg.direction === 'received') {
+        // No decrypted data yet — check if content is a valid URL
+        const isUrl = msg.content && msg.content.startsWith('http');
         const placeholder = document.createElement('div');
-        placeholder.className = 'image-placeholder';
+        placeholder.className = 'image-container';
+        placeholder.textContent = '[Image]';
+        if (isUrl) {
+          placeholder.addEventListener('click', () => {
+            vscode.postMessage({ command: 'openExternal', url: msg.content });
+          });
+        }
+        div.appendChild(placeholder);
+      } else {
+        // Sent image
+        const placeholder = document.createElement('div');
+        placeholder.className = 'image-container image-sent';
         placeholder.textContent = '[Image sent]';
         div.appendChild(placeholder);
       }
@@ -116,14 +128,7 @@
     fileInput.value = '';
   });
 
-  // Lightbox
-  document.addEventListener('click', (e) => {
-    if (e.target.matches('.image-placeholder')) {
-      lightboxImg.src = '';
-      lightbox.classList.remove('hidden');
-    }
-  });
-
+  // Lightbox — close on X or background click
   lightboxClose.addEventListener('click', () => {
     lightbox.classList.add('hidden');
   });

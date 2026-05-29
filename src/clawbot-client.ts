@@ -44,6 +44,10 @@ export class ClawBotClient extends vscode.Disposable {
   private _onLoginSuccess = new vscode.EventEmitter<void>();
   readonly onLoginSuccess = this._onLoginSuccess.event;
 
+  // Image cache: decrypted image data keyed by message ID
+  private imageCache = new Map<number, string>(); // messageId -> dataUrl
+  private static readonly MAX_CACHED_IMAGES = 50;
+
   constructor(
     private context: vscode.ExtensionContext,
     private db: ChatDB
@@ -255,10 +259,18 @@ export class ClawBotClient extends vscode.Disposable {
   private async processMessages(msgs: ILinkMessage[]): Promise<void> {
     for (const msg of msgs) {
       for (const item of msg.item_list) {
+        console.log('[ClawBot] processMessage item:', JSON.stringify(item));
+        let content = item.text_item?.text || '';
+        if (item.type === 2 && item.image_item) {
+          content = item.image_item.media?.full_url || JSON.stringify(item);
+        } else if (!content) {
+          content = JSON.stringify(item);
+        }
+
         const chatMsg: Omit<ChatMessage, 'id'> = {
           direction: 'received',
           type: item.type as MsgTypeValue,
-          content: item.text_item?.text || JSON.stringify(item),
+          content,
           timestamp: Math.floor(Date.now() / 1000),
           context_token: msg.context_token,
           from_user_id: msg.from_user_id,
@@ -268,10 +280,51 @@ export class ClawBotClient extends vscode.Disposable {
         await this.db.setMetadata('from_user_id', msg.from_user_id);
         await this.db.setMetadata('to_user_id', msg.to_user_id);
 
+        // For images, fetch and decrypt before firing so webview has the data
+        let imageDataUrl: string | undefined;
+        if (item.type === 2 && item.image_item) {
+          console.log('[ClawBot] Fetching image:', item.image_item.media?.full_url?.substring(0, 50));
+          imageDataUrl = await this.fetchImageAsDataUrl(item.image_item.media.full_url, item.image_item.media.aes_key);
+          console.log('[ClawBot] Image fetched:', imageDataUrl ? imageDataUrl.length + ' bytes data url' : 'failed');
+        }
+
         const id = await this.db.insertMessage(chatMsg);
-        this._onMessage.fire({ ...chatMsg, id });
+
+        if (imageDataUrl) {
+          this.imageCache.set(id, imageDataUrl);
+        }
+
+        this._onMessage.fire({ ...chatMsg, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
       }
     }
+  }
+
+  private async fetchImageAsDataUrl(cdnUrl: string, aesKeyBase64: string): Promise<string | undefined> {
+    try {
+      const aesKey = Buffer.from(aesKeyBase64, 'base64');
+      const agent = this.getProxyAgent();
+      const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
+      if (!resp.ok) return undefined;
+      const encrypted = Buffer.from(await resp.arrayBuffer());
+      const decrypted = this.aesDecryptImage(encrypted, aesKey);
+      return `data:image/png;base64,${decrypted.toString('base64')}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private aesDecryptImage(data: Buffer, key: Buffer): Buffer {
+    const decipher = crypto.createDecipheriv('aes-128-ecb', key, '');
+    decipher.setAutoPadding(true);
+    return Buffer.concat([decipher.update(data), decipher.final()]);
+  }
+
+  private cacheImage(messageId: number, dataUrl: string): void {
+    if (this.imageCache.size >= ClawBotClient.MAX_CACHED_IMAGES) {
+      const oldest = this.imageCache.keys().next().value;
+      if (oldest !== undefined) this.imageCache.delete(oldest);
+    }
+    this.imageCache.set(messageId, dataUrl);
   }
 
   stopPolling(): void {
