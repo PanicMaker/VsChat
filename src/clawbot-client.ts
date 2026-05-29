@@ -444,23 +444,25 @@ export class ClawBotClient extends vscode.Disposable {
       throw new Error('Failed to get upload URL: ' + JSON.stringify(uploadUrlRes));
     }
 
-    // Upload encrypted file to CDN
+    // Upload encrypted file to CDN (official uses POST, not PUT)
     const uploadResp = await fetch(uploadUrl, {
-      method: 'PUT',
+      method: 'POST',
       body: encrypted,
       headers: { 'Content-Type': 'application/octet-stream' },
     });
     if (!uploadResp.ok) {
-      throw new Error(`Upload failed: ${uploadResp.status}`);
+      const body = await uploadResp.text().catch(() => '');
+      throw new Error(`Upload failed: ${uploadResp.status} - ${body}`);
     }
 
-    // Extract encrypted_query_param from upload URL to build download URL
-    const uploadUrlObj = new URL(uploadUrl);
-    const encryptedQueryParam = uploadUrlObj.searchParams.get('encrypted_query_param') || '';
+    // Get download encrypted_query_param from response header (official pattern)
+    const downloadEncryptedParam = uploadResp.headers.get('x-encrypted-param') || '';
     const mediaAesKey = aesKey.toString('base64');
 
     // Build the full CDN download URL
-    const fullUrl = `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(encryptedQueryParam)}`;
+    const fullUrl = downloadEncryptedParam
+      ? `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(downloadEncryptedParam)}`
+      : uploadUrl.replace('/upload', '/download');
 
     // Send message with image reference (matching official openclaw-weixin format)
     const payload = {
@@ -479,7 +481,7 @@ export class ClawBotClient extends vscode.Disposable {
               media: {
                 aes_key: mediaAesKey,
                 full_url: fullUrl,
-                encrypt_query_param: encryptedQueryParam,
+                encrypt_query_param: downloadEncryptedParam,
               },
             },
           },
