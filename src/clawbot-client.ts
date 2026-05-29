@@ -49,10 +49,6 @@ export class ClawBotClient extends vscode.Disposable {
   private _onLoginSuccess = new vscode.EventEmitter<void>();
   readonly onLoginSuccess = this._onLoginSuccess.event;
 
-  // Image cache: decrypted image data keyed by message ID
-  private imageCache = new Map<number, string>(); // messageId -> dataUrl
-  private static readonly MAX_CACHED_IMAGES = 50;
-
   constructor(
     private context: vscode.ExtensionContext,
     private db: ChatDB
@@ -296,7 +292,7 @@ export class ClawBotClient extends vscode.Disposable {
         const id = await this.db.insertMessage(chatMsg);
 
         if (imageDataUrl) {
-          this.imageCache.set(id, imageDataUrl);
+          await this.persistImage(id, imageDataUrl);
         }
 
         this._onMessage.fire({ ...chatMsg, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
@@ -316,6 +312,32 @@ export class ClawBotClient extends vscode.Disposable {
       const encrypted = Buffer.from(await resp.arrayBuffer());
       const decrypted = decryptAesEcb(encrypted, key);
       return `data:image/png;base64,${decrypted.toString('base64')}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Persist decrypted image to disk for cross-session retrieval
+  private async persistImage(messageId: number, dataUrl: string): Promise<void> {
+    try {
+      const imgDir = path.join(this.context.globalStorageUri.fsPath, 'images');
+      await fs.promises.mkdir(imgDir, { recursive: true });
+      const imgPath = path.join(imgDir, `${messageId}.png`);
+      const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+      await fs.promises.writeFile(imgPath, Buffer.from(base64, 'base64'));
+      // Also store the data URL in a JSON sidecar for easy retrieval
+      await fs.promises.writeFile(`${imgPath}.url.json`, JSON.stringify({ dataUrl }));
+    } catch (err: any) {
+      console.error('[ClawBot] Failed to persist image:', err.message);
+    }
+  }
+
+  // Load a persisted image data URL from disk
+  async getDecryptedImageUrl(messageId: number): Promise<string | undefined> {
+    try {
+      const imgPath = path.join(this.context.globalStorageUri.fsPath, 'images', `${messageId}.png.url.json`);
+      const raw = await fs.promises.readFile(imgPath, 'utf-8');
+      return JSON.parse(raw).dataUrl;
     } catch {
       return undefined;
     }

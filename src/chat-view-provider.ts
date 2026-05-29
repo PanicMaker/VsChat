@@ -129,11 +129,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   async loadHistory(): Promise<void> {
     const messages = await this.db.getRecentMessages(100);
-    this.postMessage({ command: 'loadHistory', messages });
+    // Attach persisted image data for image messages
+    const messagesWithImages = await Promise.all(
+      messages.map(async (msg) => {
+        if (msg.type === 2) {
+          const url = await this.client.getDecryptedImageUrl(msg.id);
+          return url ? { ...msg, imageDataUrl: url } : msg;
+        }
+        return msg;
+      })
+    );
+    this.postMessage({ command: 'loadHistory', messages: messagesWithImages });
   }
 
   async clearHistory(): Promise<void> {
     await this.db.clearAll();
+    // Also clear persisted images
+    try {
+      const imgDir = path.join(this.context.globalStorageUri.fsPath, 'images');
+      await fs.promises.rm(imgDir, { recursive: true, force: true });
+    } catch {
+      // Directory doesn't exist — that's fine
+    }
     this.postMessage({ command: 'clearHistory' });
   }
 
