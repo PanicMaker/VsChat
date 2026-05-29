@@ -58,9 +58,13 @@ export class ChatDB {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [msg.direction, msg.type, msg.content, msg.timestamp, msg.context_token || '', msg.from_user_id, msg.to_user_id]
     );
+
+    // Get the ID before save() — sql.js preserves last_insert_rowid()
+    const row = this.db.exec('SELECT last_insert_rowid()');
+    const id = row[0]?.values[0]?.[0] as number;
+
     this.save();
-    const row = this.db.exec('SELECT last_insert_rowid()')[0];
-    return row.values[0][0] as number;
+    return id;
   }
 
   async getRecentMessages(limit: number = 100): Promise<ChatMessage[]> {
