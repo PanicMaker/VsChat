@@ -455,6 +455,9 @@ export class ClawBotClient extends vscode.Disposable {
       throw new Error(`Upload failed: ${uploadResp.status} - ${body}`);
     }
 
+    console.log('[ClawBot] Image upload response headers:', [...uploadResp.headers.entries()]);
+    console.log('[ClawBot] Upload URL:', uploadUrl);
+
     // Get download encrypted_query_param from response header (official pattern)
     const downloadEncryptedParam = uploadResp.headers.get('x-encrypted-param') || '';
     const mediaAesKey = aesKey.toString('base64');
@@ -463,6 +466,8 @@ export class ClawBotClient extends vscode.Disposable {
     const fullUrl = downloadEncryptedParam
       ? `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(downloadEncryptedParam)}`
       : uploadUrl.replace('/upload', '/download');
+
+    console.log('[ClawBot] Image download URL:', fullUrl.substring(0, 100));
 
     // Send message with image reference (matching official openclaw-weixin format)
     const payload = {
@@ -477,12 +482,12 @@ export class ClawBotClient extends vscode.Disposable {
           {
             type: 2,
             image_item: {
-              aeskey: aesKey.toString('hex'),
               media: {
-                aes_key: mediaAesKey,
-                full_url: fullUrl,
                 encrypt_query_param: downloadEncryptedParam,
+                aes_key: mediaAesKey,
+                encrypt_type: 1,
               },
+              mid_size: encrypted.length,
             },
           },
         ],
@@ -490,15 +495,18 @@ export class ClawBotClient extends vscode.Disposable {
       base_info: { channel_version: '2.4.3' },
     };
 
-    await this.request('/ilink/bot/sendmessage', {
+    console.log('[ClawBot] sendmessage image payload:', JSON.stringify(payload, null, 2).substring(0, 500));
+
+    const sendResp = await this.request('/ilink/bot/sendmessage', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    console.log('[ClawBot] sendmessage response:', JSON.stringify(sendResp));
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
       type: MsgType.Image,
-      content: fullUrl,
+      content: '[Image]',
       timestamp: Math.floor(Date.now() / 1000),
       context_token: lastCursor,
       from_user_id: toId,
