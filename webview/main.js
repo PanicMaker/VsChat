@@ -16,6 +16,9 @@
 
   let hasPartner = false; // true once we've received a message
 
+  // Notify extension that webview is ready for messages
+  vscode.postMessage({ command: 'ready' });
+
   function sendMessage(command, data) {
     vscode.postMessage({ command, ...data });
   }

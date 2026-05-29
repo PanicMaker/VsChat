@@ -306,12 +306,15 @@ export class ClawBotClient extends vscode.Disposable {
 
   private async fetchImageAsDataUrl(cdnUrl: string, aesKeyBase64: string): Promise<string | undefined> {
     try {
-      const aesKey = Buffer.from(aesKeyBase64, 'base64');
+      // media.aes_key is base64 of a 32-char hex string
+      // Decode: base64 → hex string → 16 raw bytes (matching official openclaw-weixin)
+      const hexStr = Buffer.from(aesKeyBase64, 'base64').toString('ascii');
+      const key = Buffer.from(hexStr, 'hex');
       const agent = this.getProxyAgent();
       const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
       if (!resp.ok) return undefined;
       const encrypted = Buffer.from(await resp.arrayBuffer());
-      const decrypted = decryptAesEcb(encrypted, aesKey);
+      const decrypted = decryptAesEcb(encrypted, key);
       return `data:image/png;base64,${decrypted.toString('base64')}`;
     } catch {
       return undefined;

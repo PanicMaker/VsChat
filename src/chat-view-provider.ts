@@ -33,6 +33,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getHtml();
 
+    // Clean up old listeners before adding new ones
+    this.disposables.forEach(d => d.dispose());
+    this.disposables = [];
+
     // Handle messages from WebView
     this.disposables.push(
       webviewView.webview.onDidReceiveMessage(async (msg: WebViewOutbound) => {
@@ -80,7 +84,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // Load history if already connected
     if (this.client.connected) {
-      this.loadHistory();
+      // Delay slightly to ensure webview JS is ready
+      setTimeout(() => this.loadHistory(), 100);
     }
   }
 
@@ -104,6 +109,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.client.sendImage(tempPath);
         } finally {
           try { fs.unlinkSync(tempPath); } catch {}
+        }
+      } else if (msg.command === 'ready') {
+        // Webview is loaded and ready — load history if connected
+        if (this.client.connected) {
+          await this.loadHistory();
         }
       } else if (msg.command === 'login') {
         vscode.commands.executeCommand('clawbot.login');
