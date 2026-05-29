@@ -448,37 +448,30 @@ export class ClawBotClient extends vscode.Disposable {
       throw new Error('Failed to get upload URL: ' + JSON.stringify(uploadUrlRes));
     }
 
-    // Upload PLAINTEXT to CDN - CDN encrypts it internally (official pattern)
+    // Encrypt with AES-128-ECB before uploading (matching official openclaw-weixin)
+    const ciphertext = this.aesEncrypt(fileData, aesKey);
+    const agent = this.getProxyAgent();
     const uploadResp = await fetch(uploadUrl, {
       method: 'POST',
-      body: fileData,
+      body: ciphertext,
       headers: { 'Content-Type': 'application/octet-stream' },
-    });
+      dispatcher: agent,
+    } as RequestInit);
     if (!uploadResp.ok) {
       const body = await uploadResp.text().catch(() => '');
       throw new Error(`Upload failed: ${uploadResp.status} - ${body}`);
     }
 
-    console.log('[ClawBot] Image upload response headers:', [...uploadResp.headers.entries()]);
-    console.log('[ClawBot] Upload URL:', uploadUrl);
+    // Get download encrypted param from CDN response (official pattern)
+    const downloadEncryptedParam = uploadResp.headers.get('x-encrypted-param')
+      || uploadUrlRes.upload_param
+      || '';
+    // aes_key: base64-encode the hex string (matching official openclaw-weixin)
+    const mediaAesKey = Buffer.from(aesKey.toString('hex')).toString('base64');
 
-    // Get download encrypted_query_param from response header (official pattern)
-    const downloadEncryptedParam = uploadResp.headers.get('x-encrypted-param') || '';
-    const mediaAesKey = aesKey.toString('base64');
+    console.log('[ClawBot] Image uploaded, downloadParam length=', downloadEncryptedParam.length);
 
-    // Build the full CDN download URL - match incoming message format with taskid
-    const uploadUrlObj = new URL(uploadUrl);
-    const taskid = uploadUrlObj.searchParams.get('taskid') || '';
-    const fullUrl = downloadEncryptedParam
-      ? `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(downloadEncryptedParam)}${taskid ? '&taskid=' + taskid : ''}`
-      : uploadUrl.replace('/upload', '/download');
-
-    console.log('[ClawBot] Image upload: downloadParam length=', downloadEncryptedParam.length);
-    console.log('[ClawBot] Image download URL:', fullUrl.substring(0, 120));
-    console.log('[ClawBot] Image aeskey hex=', aesKey.toString('hex'));
-    console.log('[ClawBot] Image aes_key base64=', mediaAesKey);
-
-    // Send message with image reference (matching incoming message format)
+    // Send message with image reference (matching official openclaw-weixin format)
     const payload = {
       msg: {
         to_user_id: fromId,
@@ -494,7 +487,6 @@ export class ClawBotClient extends vscode.Disposable {
               media: {
                 encrypt_query_param: downloadEncryptedParam,
                 aes_key: mediaAesKey,
-                full_url: fullUrl,
                 encrypt_type: 1,
               },
               mid_size: filesize,
@@ -505,16 +497,10 @@ export class ClawBotClient extends vscode.Disposable {
       base_info: { channel_version: '2.4.3' },
     };
 
-    console.log('[ClawBot] sendmessage image full payload:', JSON.stringify({ ...payload, msg: { ...payload.msg, item_list: [JSON.stringify(payload.msg.item_list[0])] } }));
-    console.log('[ClawBot] sendmessage image item:', JSON.stringify(payload.msg.item_list[0]));
-
-    console.log('[ClawBot] sendmessage image payload:', JSON.stringify(payload, null, 2).substring(0, 500));
-
-    const sendResp = await this.request('/ilink/bot/sendmessage', {
+    await this.request('/ilink/bot/sendmessage', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    console.log('[ClawBot] sendmessage response:', JSON.stringify(sendResp));
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
