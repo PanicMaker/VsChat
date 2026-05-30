@@ -59,12 +59,23 @@ export class ClawBotClient extends vscode.Disposable {
     super(() => this.dispose());
   }
 
+  private _cachedProxyUrl: string = '';
+  private _cachedProxyAgent: ProxyAgent | undefined;
+
   private getProxyAgent(): ProxyAgent | undefined {
     const config = vscode.workspace.getConfiguration('clawbot');
     const proxyUrl = config.get<string>('proxyUrl') || '';
     const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '';
     const proxy = proxyUrl || envProxy;
-    return proxy ? new ProxyAgent(proxy) : undefined;
+
+    // Reuse cached agent if proxy URL hasn't changed
+    if (proxy === this._cachedProxyUrl) {
+      return this._cachedProxyAgent;
+    }
+
+    this._cachedProxyUrl = proxy;
+    this._cachedProxyAgent = proxy ? new ProxyAgent(proxy) : undefined;
+    return this._cachedProxyAgent;
   }
 
   private async request<T>(urlPath: string, init?: RequestInit): Promise<T> {
