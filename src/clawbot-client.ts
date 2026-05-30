@@ -73,6 +73,14 @@ export class ClawBotClient extends vscode.Disposable {
       return this._cachedProxyAgent;
     }
 
+    // Proxy changed — log and recreate
+    if (proxy) {
+      const source = proxyUrl ? 'settings' : 'env';
+      console.log(`[ClawBot] Proxy configured (${source}): ${proxy}`);
+    } else if (this._cachedProxyUrl) {
+      console.log('[ClawBot] Proxy removed, using direct connection');
+    }
+
     this._cachedProxyUrl = proxy;
     this._cachedProxyAgent = proxy ? new ProxyAgent(proxy) : undefined;
     return this._cachedProxyAgent;
@@ -81,6 +89,8 @@ export class ClawBotClient extends vscode.Disposable {
   private async request<T>(urlPath: string, init?: RequestInit): Promise<T> {
     const url = `${this.botBaseUrl}${urlPath}`;
     const agent = this.getProxyAgent();
+    const method = (init?.method || 'GET').toUpperCase();
+    console.log(`[ClawBot] ${method} ${urlPath} ${agent ? '(via proxy)' : '(direct)'}`);
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -462,6 +472,7 @@ export class ClawBotClient extends vscode.Disposable {
     // Encrypt with AES-128-ECB before uploading (matching official openclaw-weixin)
     const ciphertext = this.aesEncrypt(fileData, aesKey);
     const agent = this.getProxyAgent();
+    console.log(`[ClawBot] CDN upload ${ciphertext.length} bytes ${agent ? '(via proxy)' : '(direct)'}`);
     const uploadResp = await fetch(uploadUrl, {
       method: 'POST',
       body: ciphertext,
