@@ -31,7 +31,7 @@ function randomUin(): string {
   return buf.toString('base64');
 }
 
-export class ClawBotClient extends vscode.Disposable {
+export class VsChatClient extends vscode.Disposable {
   private botToken: string = '';
   private botBaseUrl: string = BASE_URL;
   private polling: boolean = false;
@@ -63,7 +63,7 @@ export class ClawBotClient extends vscode.Disposable {
   private _cachedProxyAgent: ProxyAgent | undefined;
 
   private getProxyAgent(): ProxyAgent | undefined {
-    const config = vscode.workspace.getConfiguration('clawbot');
+    const config = vscode.workspace.getConfiguration('vschat');
     const proxyUrl = config.get<string>('proxyUrl') || '';
     const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '';
     const proxy = proxyUrl || envProxy;
@@ -76,9 +76,9 @@ export class ClawBotClient extends vscode.Disposable {
     // Proxy changed — log and recreate
     if (proxy) {
       const source = proxyUrl ? 'settings' : 'env';
-      console.log(`[ClawBot] Proxy configured (${source}): ${proxy}`);
+      console.log(`[VsChat] Proxy configured (${source}): ${proxy}`);
     } else if (this._cachedProxyUrl) {
-      console.log('[ClawBot] Proxy removed, using direct connection');
+      console.log('[VsChat] Proxy removed, using direct connection');
     }
 
     this._cachedProxyUrl = proxy;
@@ -90,7 +90,7 @@ export class ClawBotClient extends vscode.Disposable {
     const url = `${this.botBaseUrl}${urlPath}`;
     const agent = this.getProxyAgent();
     const method = (init?.method || 'GET').toUpperCase();
-    console.log(`[ClawBot] ${method} ${urlPath} ${agent ? '(via proxy)' : '(direct)'}`);
+    console.log(`[VsChat] ${method} ${urlPath} ${agent ? '(via proxy)' : '(direct)'}`);
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -140,7 +140,7 @@ export class ClawBotClient extends vscode.Disposable {
     }
 
     this._connected = true;
-    await this.context.secrets.store('clawbot_token', this.botToken);
+    await this.context.secrets.store('vschat_token', this.botToken);
     await this.saveCredentialsToFile();
     this.emitStatus('Login successful');
     this._onLoginSuccess.fire();
@@ -156,7 +156,7 @@ export class ClawBotClient extends vscode.Disposable {
       };
       await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2));
     } catch (err: any) {
-      console.error('[ClawBot] Failed to save credentials file:', err.message);
+      console.error('[VsChat] Failed to save credentials file:', err.message);
     }
   }
 
@@ -184,7 +184,7 @@ export class ClawBotClient extends vscode.Disposable {
       });
       return base64;
     } catch (err: any) {
-      console.error('[ClawBot] QR generation error:', err.message);
+      console.error('[VsChat] QR generation error:', err.message);
       return null;
     }
   }
@@ -215,7 +215,7 @@ export class ClawBotClient extends vscode.Disposable {
 
   async restoreLogin(): Promise<boolean> {
     // Try SecretStorage first
-    const secretToken = await this.context.secrets.get('clawbot_token');
+    const secretToken = await this.context.secrets.get('vschat_token');
     if (secretToken) {
       this.botToken = secretToken;
       this._connected = true;
@@ -241,7 +241,7 @@ export class ClawBotClient extends vscode.Disposable {
     this.polling = true;
     this.pollingAbort = new AbortController();
     this.reconnectDelay = 1000;
-    console.log('[ClawBot] Polling started');
+    console.log('[VsChat] Polling started');
     this.pollLoop().catch((err) => {
       this.emitStatus(`Polling error: ${err.message}`);
     });
@@ -251,7 +251,7 @@ export class ClawBotClient extends vscode.Disposable {
     while (this.polling) {
       try {
         const cursor = await this.db.getMetadata('last_cursor') || '';
-        console.log('[ClawBot] Polling getupdates, cursor length:', cursor.length);
+        console.log('[VsChat] Polling getupdates, cursor length:', cursor.length);
         const res = await this.request<GetUpdatesResponse>('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
@@ -260,7 +260,7 @@ export class ClawBotClient extends vscode.Disposable {
           }),
           signal: this.pollingAbort?.signal,
         });
-        console.log('[ClawBot] getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
+        console.log('[VsChat] getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
 
         if (res.msgs && res.msgs.length > 0) {
           await this.processMessages(res.msgs);
@@ -272,7 +272,7 @@ export class ClawBotClient extends vscode.Disposable {
 
         this.reconnectDelay = 1000;
       } catch (err: any) {
-        console.log('[ClawBot] Poll error:', err.name, err.message);
+        console.log('[VsChat] Poll error:', err.name, err.message);
         if (err.name === 'AbortError') break;
         this.emitStatus(`Connection lost, retrying in ${this.reconnectDelay / 1000}s...`);
         await this.sleep(this.reconnectDelay);
@@ -284,7 +284,7 @@ export class ClawBotClient extends vscode.Disposable {
   private async processMessages(msgs: ILinkMessage[]): Promise<void> {
     for (const msg of msgs) {
       for (const item of msg.item_list) {
-        console.log('[ClawBot] processMessage item:', JSON.stringify(item));
+        console.log('[VsChat] processMessage item:', JSON.stringify(item));
         let content = item.text_item?.text || '';
         if (item.type === 2 && item.image_item) {
           content = item.image_item.media?.full_url || JSON.stringify(item);
@@ -308,9 +308,9 @@ export class ClawBotClient extends vscode.Disposable {
         // For images, fetch and decrypt before firing so webview has the data
         let imageDataUrl: string | undefined;
         if (item.type === 2 && item.image_item) {
-          console.log('[ClawBot] Fetching image:', item.image_item.media?.full_url?.substring(0, 50));
+          console.log('[VsChat] Fetching image:', item.image_item.media?.full_url?.substring(0, 50));
           imageDataUrl = await this.fetchImageAsDataUrl(item.image_item.media.full_url, item.image_item.media.aes_key);
-          console.log('[ClawBot] Image fetched:', imageDataUrl ? imageDataUrl.length + ' bytes data url' : 'failed');
+          console.log('[VsChat] Image fetched:', imageDataUrl ? imageDataUrl.length + ' bytes data url' : 'failed');
         }
 
         const id = await this.db.insertMessage(chatMsg);
@@ -326,26 +326,26 @@ export class ClawBotClient extends vscode.Disposable {
 
   private async fetchImageAsDataUrl(cdnUrl: string, aesKeyBase64: string): Promise<string | undefined> {
     try {
-      console.log('[ClawBot] fetchImage: cdnUrl=', cdnUrl.substring(0, 80));
-      console.log('[ClawBot] fetchImage: aesKeyBase64=', aesKeyBase64.substring(0, 40));
+      console.log('[VsChat] fetchImage: cdnUrl=', cdnUrl.substring(0, 80));
+      console.log('[VsChat] fetchImage: aesKeyBase64=', aesKeyBase64.substring(0, 40));
       // media.aes_key is base64 of a 32-char hex string
       // Decode: base64 → hex string → 16 raw bytes (matching official openclaw-weixin)
       const hexStr = Buffer.from(aesKeyBase64, 'base64').toString('ascii');
-      console.log('[ClawBot] fetchImage: hexStr=', hexStr, 'length=', hexStr.length);
+      console.log('[VsChat] fetchImage: hexStr=', hexStr, 'length=', hexStr.length);
       const key = Buffer.from(hexStr, 'hex');
-      console.log('[ClawBot] fetchImage: key length=', key.length);
+      console.log('[VsChat] fetchImage: key length=', key.length);
       const agent = this.getProxyAgent();
-      console.log('[ClawBot] fetchImage: agent=', agent ? 'proxy set' : 'no proxy');
+      console.log('[VsChat] fetchImage: agent=', agent ? 'proxy set' : 'no proxy');
       const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
-      console.log('[ClawBot] fetchImage: resp.status=', resp.status, 'resp.ok=', resp.ok);
+      console.log('[VsChat] fetchImage: resp.status=', resp.status, 'resp.ok=', resp.ok);
       if (!resp.ok) return undefined;
       const encrypted = Buffer.from(await resp.arrayBuffer());
-      console.log('[ClawBot] fetchImage: encrypted length=', encrypted.length);
+      console.log('[VsChat] fetchImage: encrypted length=', encrypted.length);
       const decrypted = decryptAesEcb(encrypted, key);
-      console.log('[ClawBot] fetchImage: decrypted length=', decrypted.length);
+      console.log('[VsChat] fetchImage: decrypted length=', decrypted.length);
       return `data:image/png;base64,${decrypted.toString('base64')}`;
     } catch (err: any) {
-      console.error('[ClawBot] fetchImage error:', err.message, err.stack);
+      console.error('[VsChat] fetchImage error:', err.message, err.stack);
       return undefined;
     }
   }
@@ -361,7 +361,7 @@ export class ClawBotClient extends vscode.Disposable {
       // Also store the data URL in a JSON sidecar for easy retrieval
       await fs.promises.writeFile(`${imgPath}.url.json`, JSON.stringify({ dataUrl }));
     } catch (err: any) {
-      console.error('[ClawBot] Failed to persist image:', err.message);
+      console.error('[VsChat] Failed to persist image:', err.message);
     }
   }
 
@@ -396,7 +396,7 @@ export class ClawBotClient extends vscode.Disposable {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
-        client_id: `openclaw-vscode-${crypto.randomUUID()}`,
+        client_id: `vschat-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
@@ -472,7 +472,7 @@ export class ClawBotClient extends vscode.Disposable {
     // Encrypt with AES-128-ECB before uploading (matching official openclaw-weixin)
     const ciphertext = this.aesEncrypt(fileData, aesKey);
     const agent = this.getProxyAgent();
-    console.log(`[ClawBot] CDN upload ${ciphertext.length} bytes ${agent ? '(via proxy)' : '(direct)'}`);
+    console.log(`[VsChat] CDN upload ${ciphertext.length} bytes ${agent ? '(via proxy)' : '(direct)'}`);
     const uploadResp = await fetch(uploadUrl, {
       method: 'POST',
       body: ciphertext,
@@ -491,14 +491,14 @@ export class ClawBotClient extends vscode.Disposable {
     // aes_key: base64-encode the hex string (matching official openclaw-weixin)
     const mediaAesKey = Buffer.from(aesKey.toString('hex')).toString('base64');
 
-    console.log('[ClawBot] Image uploaded, downloadParam length=', downloadEncryptedParam.length);
+    console.log('[VsChat] Image uploaded, downloadParam length=', downloadEncryptedParam.length);
 
     // Send message with image reference (matching official openclaw-weixin format)
     const payload = {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
-        client_id: `openclaw-vscode-${crypto.randomUUID()}`,
+        client_id: `vschat-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
@@ -561,7 +561,7 @@ export class ClawBotClient extends vscode.Disposable {
     this._connected = false;
     this.botToken = '';
     this.botBaseUrl = BASE_URL;
-    await this.context.secrets.delete('clawbot_token');
+    await this.context.secrets.delete('vschat_token');
     try {
       const filePath = path.join(this.context.globalStorageUri.fsPath, 'credentials.json');
       await fs.promises.unlink(filePath);

@@ -10,7 +10,7 @@ export class ChatDB {
   private dbPath: string;
 
   constructor(context: vscode.ExtensionContext) {
-    this.dbPath = path.join(context.globalStorageUri.fsPath, 'clawbot_chats.db');
+    this.dbPath = path.join(context.globalStorageUri.fsPath, 'vschat_chats.db');
   }
 
   async init(): Promise<void> {

@@ -1,19 +1,19 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { ClawBotClient } from './clawbot-client';
+import { VsChatClient } from './vschat-client';
 import { ChatDB } from './chat-db';
 import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'clawbot.chatView';
+  public static readonly viewType = 'vschat.chatView';
 
   private view: vscode.WebviewView | null = null;
   private disposables: vscode.Disposable[] = [];
 
   constructor(
     private context: vscode.ExtensionContext,
-    private client: ClawBotClient,
+    private client: VsChatClient,
     private db: ChatDB
   ) {}
 
@@ -116,7 +116,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.loadHistory();
         }
       } else if (msg.command === 'login') {
-        vscode.commands.executeCommand('clawbot.login');
+        vscode.commands.executeCommand('vschat.login');
       } else if (msg.command === 'openExternal' && msg.url) {
         vscode.env.openExternal(vscode.Uri.parse(msg.url));
       } else if (msg.command === 'loadMoreHistory') {

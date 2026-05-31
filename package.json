@@ -1,7 +1,7 @@
 {
-  "name": "vscode-clawbot",
-  "displayName": "WeChat ClawBot",
-  "description": "Chat with WeChat contacts via ClawBot iLink protocol",
+  "name": "vschat",
+  "displayName": "VsChat",
+  "description": "Chat with WeChat contacts via iLink protocol in VSCode",
   "version": "0.1.0",
   "publisher": "PanicMaker",
   "repository": {
@@ -22,44 +22,44 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "clawbot",
-          "title": "WeChat ClawBot",
+          "id": "vschat",
+          "title": "VsChat",
           "icon": "$(comment-discussion)"
         }
       ]
     },
     "views": {
-      "clawbot": [
+      "vschat": [
         {
           "type": "webview",
-          "id": "clawbot.chatView",
+          "id": "vschat.chatView",
           "name": "Chat"
         }
       ]
     },
     "commands": [
       {
-        "command": "clawbot.login",
-        "title": "ClawBot: Login"
+        "command": "vschat.login",
+        "title": "VsChat: Login"
       },
       {
-        "command": "clawbot.clearHistory",
-        "title": "ClawBot: Clear Chat History"
+        "command": "vschat.clearHistory",
+        "title": "VsChat: Clear Chat History"
       },
       {
-        "command": "clawbot.disconnect",
-        "title": "ClawBot: Disconnect"
+        "command": "vschat.disconnect",
+        "title": "VsChat: Disconnect"
       }
     ],
     "configuration": {
-      "title": "WeChat ClawBot",
+      "title": "VsChat",
       "properties": {
-        "clawbot.proxyUrl": {
+        "vschat.proxyUrl": {
           "type": "string",
           "default": "",
           "description": "HTTP proxy URL (e.g., http://proxy.example.com:8080). Leave empty to use system proxy."
         },
-        "clawbot.fromUserId": {
+        "vschat.fromUserId": {
           "type": "string",
           "default": "",
           "description": "WeChat contact ID to chat with (e.g., o9cq800kum_xxx@im.wechat). Leave empty to auto-detect."

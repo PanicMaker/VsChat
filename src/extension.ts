@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
 import { ChatDB } from './chat-db';
-import { ClawBotClient } from './clawbot-client';
+import { VsChatClient } from './vschat-client';
 import { ChatViewProvider } from './chat-view-provider';
 
-let client: ClawBotClient | undefined;
+let client: VsChatClient | undefined;
 let db: ChatDB | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -11,8 +11,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   db = new ChatDB(context);
   await db.init();
 
-  // Initialize ClawBot client
-  client = new ClawBotClient(context, db);
+  // Initialize VsChat client
+  client = new VsChatClient(context, db);
   context.subscriptions.push(client);
 
   // Try to restore previous session before registering provider
@@ -34,7 +34,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('clawbot.login', async () => {
+    vscode.commands.registerCommand('vschat.login', async () => {
       if (client) {
         await client.login();
         await client.startPolling();
@@ -43,7 +43,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('clawbot.clearHistory', async () => {
+    vscode.commands.registerCommand('vschat.clearHistory', async () => {
       if (provider) {
         await provider.clearHistory();
         vscode.window.showInformationMessage('Chat history cleared');
@@ -52,7 +52,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('clawbot.disconnect', async () => {
+    vscode.commands.registerCommand('vschat.disconnect', async () => {
       if (client) {
         await client.logout();
         vscode.window.showInformationMessage('Disconnected from WeChat');
