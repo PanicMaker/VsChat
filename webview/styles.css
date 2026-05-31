@@ -39,7 +39,47 @@ body {
   display: none !important;
 }
 
-/* Chat messages */
+/* ============================
+   Style switcher toolbar
+   ============================ */
+#toolbar {
+  display: flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  background: var(--vscode-editor-background, #1e1e1e);
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+#toolbar .toolbar-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 3px;
+  font-family: inherit;
+}
+
+#toolbar .toolbar-btn:hover {
+  background: var(--vscode-list-hoverBackground, #2a2d2e);
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+#toolbar .toolbar-btn.active {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  background: var(--vscode-list-activeSelectionBackground, #094771);
+}
+
+#toolbar .toolbar-spacer {
+  flex: 1;
+}
+
+/* ============================
+   Chat container (shared)
+   ============================ */
 #chat-container {
   flex: 1;
   overflow-y: auto;
@@ -52,7 +92,10 @@ body {
   gap: 8px;
 }
 
-.message {
+/* ============================
+   MODE: Chat (default bubbles)
+   ============================ */
+body.mode-chat .message {
   max-width: 80%;
   padding: 8px 12px;
   border-radius: 12px;
@@ -61,27 +104,27 @@ body {
   font-size: 13px;
 }
 
-.message.sent {
+body.mode-chat .message.sent {
   align-self: flex-end;
   background: #0078d4;
   color: white;
   border-bottom-right-radius: 4px;
 }
 
-.message.received {
+body.mode-chat .message.received {
   align-self: flex-start;
   background: var(--vscode-editor-inactiveSelectionBackground, #3a3d41);
   color: var(--vscode-editor-foreground, #d4d4d4);
   border-bottom-left-radius: 4px;
 }
 
-.message .timestamp {
+body.mode-chat .message .timestamp {
   font-size: 10px;
   opacity: 0.6;
   margin-top: 4px;
 }
 
-.message img {
+body.mode-chat .message img {
   max-width: 100%;
   max-height: 200px;
   border-radius: 8px;
@@ -91,7 +134,7 @@ body {
   object-fit: contain;
 }
 
-.message .image-container {
+body.mode-chat .message .image-container {
   display: inline-block;
   padding: 12px;
   background: rgba(255, 255, 255, 0.1);
@@ -101,16 +144,11 @@ body {
   font-size: 12px;
 }
 
-.message .image-container.image-error {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.message .image-container.image-sent {
+body.mode-chat .message .image-container.image-sent {
   background: rgba(255, 255, 255, 0.15);
 }
 
-/* Input bar */
-#input-bar {
+body.mode-chat #input-bar {
   display: flex;
   gap: 8px;
   padding: 12px;
@@ -118,7 +156,7 @@ body {
   border-top: 1px solid var(--vscode-panel-border, #333);
 }
 
-#text-input {
+body.mode-chat #text-input {
   flex: 1;
   padding: 8px 12px;
   border: 1px solid var(--vscode-input-border, #555);
@@ -129,11 +167,12 @@ body {
   outline: none;
 }
 
-#text-input:focus {
+body.mode-chat #text-input:focus {
   border-color: #0078d4;
 }
 
-#send-btn, #attach-btn {
+body.mode-chat #send-btn,
+body.mode-chat #attach-btn {
   padding: 8px 16px;
   border: none;
   border-radius: 6px;
@@ -141,16 +180,16 @@ body {
   font-size: 13px;
 }
 
-#send-btn {
+body.mode-chat #send-btn {
   background: #0078d4;
   color: white;
 }
 
-#send-btn:hover {
+body.mode-chat #send-btn:hover {
   background: #106ebe;
 }
 
-#attach-btn {
+body.mode-chat #attach-btn {
   background: transparent;
   color: var(--vscode-editor-foreground, #d4d4d4);
   padding: 8px 8px;
@@ -158,11 +197,262 @@ body {
   align-items: center;
 }
 
-#attach-btn:hover {
+body.mode-chat #attach-btn:hover {
   background: var(--vscode-list-hoverBackground, #2a2d2e);
 }
 
-/* Lightbox */
+/* ============================
+   MODE: Log (terminal output)
+   ============================ */
+body.mode-log {
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', 'Fira Code', 'Consolas', monospace);
+}
+
+body.mode-log #chat-container {
+  padding: 4px 8px;
+}
+
+body.mode-log #messages {
+  gap: 1px;
+}
+
+body.mode-log .message {
+  max-width: 100%;
+  padding: 1px 0;
+  border-radius: 0;
+  word-wrap: break-word;
+  line-height: 1.45;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  align-self: stretch;
+  background: transparent;
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+body.mode-log .message.sent {
+  color: #6a9955; /* green like stdout */
+}
+
+body.mode-log .message.received {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+body.mode-log .message .timestamp {
+  display: inline;
+  font-size: 12px;
+  opacity: 0.5;
+  margin-top: 0;
+  margin-right: 4px;
+}
+
+body.mode-log .message .msg-text {
+  display: inline;
+}
+
+body.mode-log .message img {
+  max-width: 60%;
+  max-height: 120px;
+  border-radius: 2px;
+  cursor: pointer;
+  display: block;
+  margin: 2px 0;
+  object-fit: contain;
+}
+
+body.mode-log .message .image-container {
+  display: inline;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+  color: #569cd6;
+}
+
+body.mode-log .message .image-container.image-sent {
+  background: transparent;
+  color: #6a9955;
+}
+
+body.mode-log #input-bar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--vscode-editor-background, #1e1e1e);
+  border-top: 1px solid var(--vscode-panel-border, #333);
+}
+
+body.mode-log #text-input {
+  flex: 1;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--vscode-editor-foreground, #cccccc);
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  outline: none;
+}
+
+body.mode-log #send-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  padding: 3px 6px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+body.mode-log #send-btn:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+body.mode-log #attach-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  padding: 3px 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+body.mode-log #attach-btn:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+/* ============================
+   MODE: Git (diff / commit log)
+   ============================ */
+body.mode-git {
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', 'Fira Code', 'Consolas', monospace);
+}
+
+body.mode-git #chat-container {
+  padding: 4px 8px;
+}
+
+body.mode-git #messages {
+  gap: 0;
+}
+
+body.mode-git .message {
+  max-width: 100%;
+  padding: 2px 0 2px 16px;
+  border-radius: 0;
+  word-wrap: break-word;
+  line-height: 1.5;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  align-self: stretch;
+  background: transparent;
+  border-left: 2px solid transparent;
+}
+
+body.mode-git .message.sent {
+  color: #6a9955;
+  border-left-color: #6a9955;
+}
+
+body.mode-git .message.received {
+  color: #d4d4d4;
+  border-left-color: #569cd6;
+}
+
+body.mode-git .message .timestamp {
+  display: inline;
+  font-size: 12px;
+  opacity: 0.45;
+  margin-top: 0;
+  margin-right: 6px;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+body.mode-git .message .msg-text {
+  display: inline;
+}
+
+body.mode-git .message img {
+  max-width: 50%;
+  max-height: 100px;
+  border-radius: 2px;
+  cursor: pointer;
+  display: block;
+  margin: 2px 0;
+  object-fit: contain;
+  opacity: 0.85;
+}
+
+body.mode-git .message .image-container {
+  display: inline;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  font-size: 12px;
+  cursor: pointer;
+  color: #ce9178;
+}
+
+body.mode-git .message .image-container.image-sent {
+  background: transparent;
+  color: #6a9955;
+}
+
+body.mode-git #input-bar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--vscode-editor-background, #1e1e1e);
+  border-top: 1px solid var(--vscode-panel-border, #333);
+}
+
+body.mode-git #text-input {
+  flex: 1;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--vscode-editor-foreground, #cccccc);
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  outline: none;
+}
+
+body.mode-git #send-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  padding: 3px 6px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+body.mode-git #send-btn:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+body.mode-git #attach-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  padding: 3px 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+body.mode-git #attach-btn:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+/* ============================
+   Lightbox (shared all modes)
+   ============================ */
 #lightbox {
   position: fixed;
   top: 0;

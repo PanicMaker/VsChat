@@ -14,72 +14,172 @@
   const lightboxImg = document.getElementById('lightbox-img');
   const lightboxClose = document.getElementById('lightbox-close');
 
-  let hasPartner = false; // true once we've received a message
+  const MODES = ['chat', 'log', 'git'];
+  const MODE_LABELS = { chat: 'Chat', log: 'Output', git: 'Changes' };
+  const MODE_PLACEHOLDERS = {
+    chat: 'Type a message...',
+    log: '> _',
+    git: 'commit -m ""',
+  };
+  const MODE_SEND_LABELS = { chat: 'Send', log: '⏎', git: '⏎' };
 
-  // Notify extension that webview is ready for messages
+  let currentMode = 'chat';
+  let hasPartner = false;
+  let allMessages = []; // keep messages for re-render on mode switch
+
+  // Restore saved mode
+  const saved = vscode.getState();
+  if (saved && saved.mode && MODES.includes(saved.mode)) {
+    currentMode = saved.mode;
+  }
+  applyMode(currentMode);
+
+  // Notify extension that webview is ready
   vscode.postMessage({ command: 'ready' });
 
-  function sendMessage(command, data) {
-    vscode.postMessage({ command, ...data });
+  // ---- Mode switching ----
+
+  function applyMode(mode) {
+    currentMode = mode;
+    document.body.className = `mode-${mode}`;
+    textInput.placeholder = MODE_PLACEHOLDERS[mode];
+    sendBtn.textContent = MODE_SEND_LABELS[mode];
+    vscode.setState({ mode });
+
+    // Update toolbar button active state
+    document.querySelectorAll('#toolbar .toolbar-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.mode === mode);
+    });
   }
+
+  function reRenderAll() {
+    messagesEl.innerHTML = '';
+    for (const msg of allMessages) {
+      renderMessage(msg);
+    }
+    scrollToBottom();
+  }
+
+  // Toolbar click handler
+  document.getElementById('toolbar').addEventListener('click', (e) => {
+    const btn = e.target.closest('.toolbar-btn');
+    if (!btn || !btn.dataset.mode) return;
+    applyMode(btn.dataset.mode);
+    reRenderAll();
+  });
+
+  // ---- Formatting helpers ----
 
   function formatTime(timestamp) {
     const date = new Date(timestamp * 1000);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
+
+  function formatLogPrefix(msg) {
+    const time = formatTime(msg.timestamp);
+    const level = msg.direction === 'sent' ? 'OUT' : 'INF';
+    return `[${time}] ${level} `;
+  }
+
+  function formatGitPrefix(msg) {
+    const time = formatTime(msg.timestamp);
+    const prefix = msg.direction === 'sent' ? '+' : ' ';
+    return `${prefix} ${time} `;
+  }
+
+  // ---- Render ----
 
   function renderMessage(msg) {
     const div = document.createElement('div');
     div.className = `message ${msg.direction}`;
     div.dataset.id = msg.id;
 
+    if (currentMode === 'chat') {
+      renderChatMode(div, msg);
+    } else if (currentMode === 'log') {
+      renderLogMode(div, msg);
+    } else if (currentMode === 'git') {
+      renderGitMode(div, msg);
+    }
+
+    messagesEl.appendChild(div);
+    scrollToBottom();
+  }
+
+  function renderChatMode(div, msg) {
     if (msg.type === 1) {
-      // Text message — render as plain text
       const textEl = document.createElement('div');
       textEl.textContent = msg.content;
       div.appendChild(textEl);
     } else if (msg.type === 2) {
-      // Image message
-      console.log('[webview] renderMessage image:', JSON.stringify({ id: msg.id, direction: msg.direction, content: msg.content, imageDataUrl: !!msg.imageDataUrl, imageDataUrlType: typeof msg.imageDataUrl }));
-      if (msg.direction === 'received' && msg.imageDataUrl) {
-        // Has decrypted image data — show thumbnail
-        const img = document.createElement('img');
-        img.className = 'message-image';
-        img.src = msg.imageDataUrl;
-        img.alt = 'Message image';
-        img.addEventListener('click', () => {
-          lightboxImg.src = img.src;
-          lightbox.classList.remove('hidden');
-        });
-        div.appendChild(img);
-      } else if (msg.direction === 'received') {
-        // No decrypted data yet — check if content is a valid URL
-        const isUrl = msg.content && msg.content.startsWith('http');
-        const placeholder = document.createElement('div');
-        placeholder.className = 'image-container';
-        placeholder.textContent = '[Image]';
-        if (isUrl) {
-          placeholder.addEventListener('click', () => {
-            vscode.postMessage({ command: 'openExternal', url: msg.content });
-          });
-        }
-        div.appendChild(placeholder);
-      } else {
-        // Sent image
-        const placeholder = document.createElement('div');
-        placeholder.className = 'image-container image-sent';
-        placeholder.textContent = '[Image sent]';
-        div.appendChild(placeholder);
-      }
+      renderImageContent(div, msg);
     }
-
     const timeEl = document.createElement('div');
     timeEl.className = 'timestamp';
     timeEl.textContent = formatTime(msg.timestamp);
     div.appendChild(timeEl);
+  }
 
-    messagesEl.appendChild(div);
-    scrollToBottom();
+  function renderLogMode(div, msg) {
+    const prefixEl = document.createElement('span');
+    prefixEl.className = 'timestamp';
+    prefixEl.textContent = formatLogPrefix(msg);
+    div.appendChild(prefixEl);
+
+    if (msg.type === 1) {
+      const textEl = document.createElement('span');
+      textEl.className = 'msg-text';
+      textEl.textContent = msg.content;
+      div.appendChild(textEl);
+    } else if (msg.type === 2) {
+      renderImageContent(div, msg);
+    }
+  }
+
+  function renderGitMode(div, msg) {
+    const prefixEl = document.createElement('span');
+    prefixEl.className = 'timestamp';
+    prefixEl.textContent = formatGitPrefix(msg);
+    div.appendChild(prefixEl);
+
+    if (msg.type === 1) {
+      const textEl = document.createElement('span');
+      textEl.className = 'msg-text';
+      textEl.textContent = msg.content;
+      div.appendChild(textEl);
+    } else if (msg.type === 2) {
+      renderImageContent(div, msg);
+    }
+  }
+
+  function renderImageContent(div, msg) {
+    if (msg.direction === 'received' && msg.imageDataUrl) {
+      const img = document.createElement('img');
+      img.className = 'message-image';
+      img.src = msg.imageDataUrl;
+      img.alt = 'image';
+      img.addEventListener('click', () => {
+        lightboxImg.src = img.src;
+        lightbox.classList.remove('hidden');
+      });
+      div.appendChild(img);
+    } else if (msg.direction === 'received') {
+      const isUrl = msg.content && msg.content.startsWith('http');
+      const placeholder = document.createElement('div');
+      placeholder.className = 'image-container';
+      placeholder.textContent = currentMode === 'chat' ? '[Image]' : '<binary data>';
+      if (isUrl) {
+        placeholder.addEventListener('click', () => {
+          vscode.postMessage({ command: 'openExternal', url: msg.content });
+        });
+      }
+      div.appendChild(placeholder);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'image-container image-sent';
+      placeholder.textContent = currentMode === 'chat' ? '[Image sent]' : '<binary 0x...>';
+      div.appendChild(placeholder);
+    }
   }
 
   function scrollToBottom() {
@@ -87,6 +187,7 @@
   }
 
   function loadHistory(messages) {
+    allMessages = messages;
     messagesEl.innerHTML = '';
     for (const msg of messages) {
       renderMessage(msg);
@@ -94,16 +195,16 @@
     scrollToBottom();
   }
 
-  // Send button
+  // ---- Events ----
+
   sendBtn.addEventListener('click', () => {
     const text = textInput.value.trim();
     if (text) {
-      sendMessage('sendMessage', { text });
+      vscode.postMessage({ command: 'sendMessage', text });
       textInput.value = '';
     }
   });
 
-  // Enter to send
   textInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -111,7 +212,6 @@
     }
   });
 
-  // Image attach
   attachBtn.addEventListener('click', () => {
     fileInput.click();
   });
@@ -121,7 +221,8 @@
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
-        sendMessage('sendImage', {
+        vscode.postMessage({
+          command: 'sendImage',
           imageData: event.target.result,
           fileName: file.name,
         });
@@ -131,7 +232,6 @@
     fileInput.value = '';
   });
 
-  // Lightbox — close on X or background click
   lightboxClose.addEventListener('click', () => {
     lightbox.classList.add('hidden');
   });
@@ -142,7 +242,8 @@
     }
   });
 
-  // Handle messages from extension host
+  // ---- Messages from extension host ----
+
   window.addEventListener('message', (event) => {
     const message = event.data;
 
@@ -150,7 +251,6 @@
       case 'loadHistory':
         loadHistory(message.messages || []);
         hasPartner = message.messages && message.messages.length > 0;
-        // Transition to chat view
         loginScreen.classList.add('hidden');
         chatContainer.classList.remove('hidden');
         inputBar.classList.remove('hidden');
@@ -158,18 +258,19 @@
 
       case 'newMessage':
         if (message.message) {
-          // If still on login screen, transition to chat
           if (!loginScreen.classList.contains('hidden')) {
             loginScreen.classList.add('hidden');
             chatContainer.classList.remove('hidden');
             inputBar.classList.remove('hidden');
           }
+          allMessages.push(message.message);
           renderMessage(message.message);
           hasPartner = true;
         }
         break;
 
       case 'clearHistory':
+        allMessages = [];
         messagesEl.innerHTML = '';
         break;
 
@@ -192,8 +293,10 @@
         if (message.error) {
           const errDiv = document.createElement('div');
           errDiv.className = 'message received';
-          errDiv.style.background = '#8b0000';
-          errDiv.textContent = `Error: ${message.error}`;
+          errDiv.style.color = '#f44747';
+          errDiv.textContent = currentMode === 'chat'
+            ? `Error: ${message.error}`
+            : `[ERR] ${message.error}`;
           messagesEl.appendChild(errDiv);
           scrollToBottom();
         }

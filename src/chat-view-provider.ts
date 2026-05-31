@@ -172,7 +172,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} data: https:;">
         <link href="${stylesUri}" rel="stylesheet">
       </head>
-      <body>
+      <body class="mode-chat">
+        <div id="toolbar">
+          <button class="toolbar-btn active" data-mode="chat">Chat</button>
+          <button class="toolbar-btn" data-mode="log">Output</button>
+          <button class="toolbar-btn" data-mode="git">Changes</button>
+          <span class="toolbar-spacer"></span>
+        </div>
         <div id="login-screen" class="hidden">
           <div id="login-status">Initializing...</div>
           <img id="qrcode" class="hidden" alt="Scan QR code">
@@ -181,7 +187,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <div id="messages"></div>
         </div>
         <div id="input-bar">
-          <button id="attach-btn" title="Send Image">&#x1F4CE;</button>
+          <button id="attach-btn" title="Attach">&#x1F4CE;</button>
           <input type="file" id="file-input" accept="image/*" class="hidden">
           <input type="text" id="text-input" placeholder="Type a message...">
           <button id="send-btn">Send</button>
