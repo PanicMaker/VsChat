@@ -5,6 +5,7 @@ import * as path from 'path';
 import { fetch, RequestInit, ProxyAgent } from 'undici';
 import QRCode from 'qrcode';
 import { ChatDB } from './chat-db';
+import * as log from './logger';
 import {
   ILinkMessage,
   ChatMessage,
@@ -76,9 +77,9 @@ export class VsChatClient extends vscode.Disposable {
     // Proxy changed — log and recreate
     if (proxy) {
       const source = proxyUrl ? 'settings' : 'env';
-      console.log(`[VsChat] Proxy configured (${source}): ${proxy}`);
+      log.info(`Proxy configured (${source}): ${proxy}`);
     } else if (this._cachedProxyUrl) {
-      console.log('[VsChat] Proxy removed, using direct connection');
+      log.info('Proxy removed, using direct connection');
     }
 
     this._cachedProxyUrl = proxy;
@@ -90,7 +91,7 @@ export class VsChatClient extends vscode.Disposable {
     const url = `${this.botBaseUrl}${urlPath}`;
     const agent = this.getProxyAgent();
     const method = (init?.method || 'GET').toUpperCase();
-    console.log(`[VsChat] ${method} ${urlPath} ${agent ? '(via proxy)' : '(direct)'}`);
+    log.info(`${method} ${urlPath} ${agent ? '(via proxy)' : '(direct)'}`);
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -156,7 +157,7 @@ export class VsChatClient extends vscode.Disposable {
       };
       await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2));
     } catch (err: any) {
-      console.error('[VsChat] Failed to save credentials file:', err.message);
+      log.error('Failed to save credentials file:', err.message);
     }
   }
 
@@ -184,7 +185,7 @@ export class VsChatClient extends vscode.Disposable {
       });
       return base64;
     } catch (err: any) {
-      console.error('[VsChat] QR generation error:', err.message);
+      log.error('QR generation error:', err.message);
       return null;
     }
   }
@@ -241,7 +242,7 @@ export class VsChatClient extends vscode.Disposable {
     this.polling = true;
     this.pollingAbort = new AbortController();
     this.reconnectDelay = 1000;
-    console.log('[VsChat] Polling started');
+    log.info('Polling started');
     this.pollLoop().catch((err) => {
       this.emitStatus(`Polling error: ${err.message}`);
     });
@@ -251,7 +252,7 @@ export class VsChatClient extends vscode.Disposable {
     while (this.polling) {
       try {
         const cursor = await this.db.getMetadata('last_cursor') || '';
-        console.log('[VsChat] Polling getupdates, cursor length:', cursor.length);
+        log.info('Polling getupdates, cursor length:', cursor.length);
         const res = await this.request<GetUpdatesResponse>('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
@@ -260,7 +261,7 @@ export class VsChatClient extends vscode.Disposable {
           }),
           signal: this.pollingAbort?.signal,
         });
-        console.log('[VsChat] getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
+        log.info('getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
 
         if (res.msgs && res.msgs.length > 0) {
           await this.processMessages(res.msgs);
@@ -272,7 +273,7 @@ export class VsChatClient extends vscode.Disposable {
 
         this.reconnectDelay = 1000;
       } catch (err: any) {
-        console.log('[VsChat] Poll error:', err.name, err.message);
+        log.info('Poll error:', err.name, err.message);
         if (err.name === 'AbortError') break;
         this.emitStatus(`Connection lost, retrying in ${this.reconnectDelay / 1000}s...`);
         await this.sleep(this.reconnectDelay);
@@ -284,7 +285,7 @@ export class VsChatClient extends vscode.Disposable {
   private async processMessages(msgs: ILinkMessage[]): Promise<void> {
     for (const msg of msgs) {
       for (const item of msg.item_list) {
-        console.log('[VsChat] processMessage item:', JSON.stringify(item));
+        log.info('processMessage item:', JSON.stringify(item));
         let content = item.text_item?.text || '';
         if (item.type === 2 && item.image_item) {
           content = item.image_item.media?.full_url || JSON.stringify(item);
@@ -308,9 +309,9 @@ export class VsChatClient extends vscode.Disposable {
         // For images, fetch and decrypt before firing so webview has the data
         let imageDataUrl: string | undefined;
         if (item.type === 2 && item.image_item) {
-          console.log('[VsChat] Fetching image:', item.image_item.media?.full_url?.substring(0, 50));
+          log.info('Fetching image:', item.image_item.media?.full_url?.substring(0, 50));
           imageDataUrl = await this.fetchImageAsDataUrl(item.image_item.media.full_url, item.image_item.media.aes_key);
-          console.log('[VsChat] Image fetched:', imageDataUrl ? imageDataUrl.length + ' bytes data url' : 'failed');
+          log.info('Image fetched:', imageDataUrl ? imageDataUrl.length + ' bytes data url' : 'failed');
         }
 
         const id = await this.db.insertMessage(chatMsg);
@@ -326,26 +327,26 @@ export class VsChatClient extends vscode.Disposable {
 
   private async fetchImageAsDataUrl(cdnUrl: string, aesKeyBase64: string): Promise<string | undefined> {
     try {
-      console.log('[VsChat] fetchImage: cdnUrl=', cdnUrl.substring(0, 80));
-      console.log('[VsChat] fetchImage: aesKeyBase64=', aesKeyBase64.substring(0, 40));
+      log.info('fetchImage: cdnUrl=', cdnUrl.substring(0, 80));
+      log.info('fetchImage: aesKeyBase64=', aesKeyBase64.substring(0, 40));
       // media.aes_key is base64 of a 32-char hex string
       // Decode: base64 → hex string → 16 raw bytes (matching official openclaw-weixin)
       const hexStr = Buffer.from(aesKeyBase64, 'base64').toString('ascii');
-      console.log('[VsChat] fetchImage: hexStr=', hexStr, 'length=', hexStr.length);
+      log.info('fetchImage: hexStr=', hexStr, 'length=', hexStr.length);
       const key = Buffer.from(hexStr, 'hex');
-      console.log('[VsChat] fetchImage: key length=', key.length);
+      log.info('fetchImage: key length=', key.length);
       const agent = this.getProxyAgent();
-      console.log('[VsChat] fetchImage: agent=', agent ? 'proxy set' : 'no proxy');
+      log.info('fetchImage: agent=', agent ? 'proxy set' : 'no proxy');
       const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
-      console.log('[VsChat] fetchImage: resp.status=', resp.status, 'resp.ok=', resp.ok);
+      log.info('fetchImage: resp.status=', resp.status, 'resp.ok=', resp.ok);
       if (!resp.ok) return undefined;
       const encrypted = Buffer.from(await resp.arrayBuffer());
-      console.log('[VsChat] fetchImage: encrypted length=', encrypted.length);
+      log.info('fetchImage: encrypted length=', encrypted.length);
       const decrypted = decryptAesEcb(encrypted, key);
-      console.log('[VsChat] fetchImage: decrypted length=', decrypted.length);
+      log.info('fetchImage: decrypted length=', decrypted.length);
       return `data:image/png;base64,${decrypted.toString('base64')}`;
     } catch (err: any) {
-      console.error('[VsChat] fetchImage error:', err.message, err.stack);
+      log.error('fetchImage error:', err.message, err.stack);
       return undefined;
     }
   }
@@ -361,7 +362,7 @@ export class VsChatClient extends vscode.Disposable {
       // Also store the data URL in a JSON sidecar for easy retrieval
       await fs.promises.writeFile(`${imgPath}.url.json`, JSON.stringify({ dataUrl }));
     } catch (err: any) {
-      console.error('[VsChat] Failed to persist image:', err.message);
+      log.error('Failed to persist image:', err.message);
     }
   }
 
@@ -472,7 +473,7 @@ export class VsChatClient extends vscode.Disposable {
     // Encrypt with AES-128-ECB before uploading (matching official openclaw-weixin)
     const ciphertext = this.aesEncrypt(fileData, aesKey);
     const agent = this.getProxyAgent();
-    console.log(`[VsChat] CDN upload ${ciphertext.length} bytes ${agent ? '(via proxy)' : '(direct)'}`);
+    log.info(`CDN upload ${ciphertext.length} bytes ${agent ? '(via proxy)' : '(direct)'}`);
     const uploadResp = await fetch(uploadUrl, {
       method: 'POST',
       body: ciphertext,
@@ -491,7 +492,7 @@ export class VsChatClient extends vscode.Disposable {
     // aes_key: base64-encode the hex string (matching official openclaw-weixin)
     const mediaAesKey = Buffer.from(aesKey.toString('hex')).toString('base64');
 
-    console.log('[VsChat] Image uploaded, downloadParam length=', downloadEncryptedParam.length);
+    log.info('Image uploaded, downloadParam length=', downloadEncryptedParam.length);
 
     // Send message with image reference (matching official openclaw-weixin format)
     const payload = {

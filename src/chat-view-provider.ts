@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { VsChatClient } from './vschat-client';
 import { ChatDB } from './chat-db';
+import * as log from './logger';
 import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -47,7 +48,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Subscribe to client events
     this.disposables.push(
       this.client.onMessage(async (chatMsg: ChatMessage & { imageDataUrl?: string }) => {
-        console.log('[provider] onMessage fired:', JSON.stringify({ id: chatMsg.id, type: chatMsg.type, direction: chatMsg.direction, contentLen: chatMsg.content.length, imageDataUrlLen: chatMsg.imageDataUrl?.length ?? 'none' }));
+        log.info('onMessage fired:', JSON.stringify({ id: chatMsg.id, type: chatMsg.type, direction: chatMsg.direction, contentLen: chatMsg.content.length, imageDataUrlLen: chatMsg.imageDataUrl?.length ?? 'none' }));
         this.postMessage({ command: 'newMessage', message: chatMsg, imageDataUrl: chatMsg.imageDataUrl });
 
         if (chatMsg.direction === 'received') {
