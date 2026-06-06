@@ -53,6 +53,7 @@
   }
 
   function reRenderAll() {
+    lastRenderedDate = '';
     messagesEl.innerHTML = '';
     for (const msg of allMessages) {
       renderMessage(msg);
@@ -70,26 +71,70 @@
 
   // ---- Formatting helpers ----
 
+  let lastRenderedDate = ''; // track for date separators
+
+  function getDateKey(timestamp) {
+    const d = new Date(timestamp * 1000);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function formatDateLabel(timestamp) {
+    const msgDate = new Date(timestamp * 1000);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+    const msgDay = new Date(msgDate.getFullYear(), msgDate.getMonth(), msgDate.getDate());
+
+    if (msgDay.getTime() === today.getTime()) return '今天';
+    if (msgDay.getTime() === yesterday.getTime()) return '昨天';
+
+    const diffDays = Math.floor((today.getTime() - msgDay.getTime()) / 86400000);
+    if (diffDays < 7) {
+      return ['周日','周一','周二','周三','周四','周五','周六'][msgDate.getDay()];
+    }
+
+    if (msgDate.getFullYear() === now.getFullYear()) {
+      return `${msgDate.getMonth() + 1}月${msgDate.getDate()}日`;
+    }
+    return `${msgDate.getFullYear()}/${msgDate.getMonth() + 1}/${msgDate.getDate()}`;
+  }
+
   function formatTime(timestamp) {
     const date = new Date(timestamp * 1000);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
   function formatLogPrefix(msg) {
-    const time = formatTime(msg.timestamp);
+    const date = new Date(msg.timestamp * 1000);
+    const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const level = msg.direction === 'sent' ? 'OUT' : 'INF';
     return `[${time}] ${level} `;
   }
 
   function formatGitPrefix(msg) {
-    const time = formatTime(msg.timestamp);
+    const date = new Date(msg.timestamp * 1000);
+    const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const prefix = msg.direction === 'sent' ? '+' : ' ';
     return `${prefix} ${time} `;
+  }
+
+  function insertDateSeparator(timestamp) {
+    const dateKey = getDateKey(timestamp);
+    if (dateKey !== lastRenderedDate) {
+      lastRenderedDate = dateKey;
+      const sep = document.createElement('div');
+      sep.className = 'date-separator';
+      sep.textContent = formatDateLabel(timestamp);
+      messagesEl.appendChild(sep);
+    }
   }
 
   // ---- Render ----
 
   function renderMessage(msg) {
+    // Insert date separator if day changed
+    insertDateSeparator(msg.timestamp);
+
     const div = document.createElement('div');
     div.className = `message ${msg.direction}`;
     div.dataset.id = msg.id;
@@ -188,6 +233,7 @@
 
   function loadHistory(messages) {
     allMessages = messages;
+    lastRenderedDate = '';
     messagesEl.innerHTML = '';
     for (const msg of messages) {
       renderMessage(msg);
