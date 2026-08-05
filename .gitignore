@@ -5,3 +5,4 @@ dist/
 *.db
 .vscode-test/
 *.log
+.claude
