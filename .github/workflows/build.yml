@@ -5,13 +5,7 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
-  # 允许手动触发（用于发布 Release）
   workflow_dispatch:
-    inputs:
-      release:
-        description: "Create a GitHub Release with the VSIX"
-        type: boolean
-        default: false
 
 jobs:
   build:
@@ -19,10 +13,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -37,7 +31,7 @@ jobs:
         run: npx -y @vscode/vsce package -o vschat.vsix
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vschat-vsix
           path: vschat.vsix
@@ -46,16 +40,18 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'
+    if: |
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download VSIX artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vschat-vsix
 
@@ -63,10 +59,26 @@ jobs:
         id: version
         run: echo "version=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Generate release notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PREV_TAG="$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -v "^v${VERSION}$" | head -1 || true)"
+          {
+            echo "## Changes in v${VERSION}"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              git log --oneline --no-merges "$PREV_TAG"..HEAD
+            else
+              git log --oneline --no-merges HEAD
+            fi
+          } > RELEASE_NOTES.md
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: Release v${{ steps.version.outputs.version }}
+          body_path: RELEASE_NOTES.md
           files: vschat.vsix
-          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
+          make_latest: true
