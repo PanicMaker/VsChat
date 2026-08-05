@@ -13,6 +13,17 @@
   const lightbox = document.getElementById('lightbox');
   const lightboxImg = document.getElementById('lightbox-img');
   const lightboxClose = document.getElementById('lightbox-close');
+  const lightboxZoomLabel = document.getElementById('lightbox-zoom');
+
+  // Lightbox zoom / pan state
+  let lightboxZoom = 1;
+  let lightboxPanX = 0;
+  let lightboxPanY = 0;
+  let lightboxDragging = false;
+  let lightboxDragStartX = 0;
+  let lightboxDragStartY = 0;
+  let lightboxStartPanX = 0;
+  let lightboxStartPanY = 0;
 
   const MODES = ['chat', 'log', 'git'];
   const MODE_LABELS = { chat: 'Chat', log: 'Output', git: 'Changes' };
@@ -204,8 +215,7 @@
       img.src = msg.imageDataUrl;
       img.alt = 'image';
       img.addEventListener('click', () => {
-        lightboxImg.src = img.src;
-        lightbox.classList.remove('hidden');
+        openLightbox(img.src);
       });
       div.appendChild(img);
     } else if (msg.direction === 'received') {
@@ -229,6 +239,33 @@
 
   function scrollToBottom() {
     chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+
+  // ---- Lightbox zoom & pan ----
+
+  function applyLightboxTransform() {
+    lightboxImg.style.transform = `translate(${lightboxPanX}px, ${lightboxPanY}px) scale(${lightboxZoom})`;
+    if (lightboxZoomLabel) {
+      lightboxZoomLabel.textContent = Math.round(lightboxZoom * 100) + '%';
+    }
+  }
+
+  function resetLightboxTransform() {
+    lightboxZoom = 1;
+    lightboxPanX = 0;
+    lightboxPanY = 0;
+    applyLightboxTransform();
+  }
+
+  function openLightbox(src) {
+    lightboxImg.src = src;
+    resetLightboxTransform();
+    lightbox.classList.remove('hidden');
+  }
+
+  function closeLightbox() {
+    lightbox.classList.add('hidden');
+    resetLightboxTransform();
   }
 
   function loadHistory(messages) {
@@ -279,14 +316,59 @@
   });
 
   lightboxClose.addEventListener('click', () => {
-    lightbox.classList.add('hidden');
+    closeLightbox();
   });
 
   lightbox.addEventListener('click', (e) => {
     if (e.target === lightbox) {
-      lightbox.classList.add('hidden');
+      closeLightbox();
     }
   });
+
+  // Mouse wheel zooms toward the cursor position
+  lightbox.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = Math.pow(1.1, -e.deltaY / 100);
+    const newZoom = Math.min(6, Math.max(1, lightboxZoom * factor));
+    if (newZoom === lightboxZoom) return;
+
+    const rect = lightboxImg.getBoundingClientRect();
+    const offsetX = e.clientX - rect.left - rect.width / 2;
+    const offsetY = e.clientY - rect.top - rect.height / 2;
+    const ratio = newZoom / lightboxZoom - 1;
+    lightboxPanX -= offsetX * ratio;
+    lightboxPanY -= offsetY * ratio;
+    lightboxZoom = newZoom;
+    applyLightboxTransform();
+  }, { passive: false });
+
+  // Drag to pan when zoomed in
+  lightboxImg.addEventListener('pointerdown', (e) => {
+    if (lightboxZoom <= 1) return;
+    lightboxDragging = true;
+    lightboxDragStartX = e.clientX;
+    lightboxDragStartY = e.clientY;
+    lightboxStartPanX = lightboxPanX;
+    lightboxStartPanY = lightboxPanY;
+    lightboxImg.setPointerCapture(e.pointerId);
+    lightboxImg.classList.add('dragging');
+    e.preventDefault();
+  });
+
+  lightboxImg.addEventListener('pointermove', (e) => {
+    if (!lightboxDragging) return;
+    lightboxPanX = lightboxStartPanX + (e.clientX - lightboxDragStartX);
+    lightboxPanY = lightboxStartPanY + (e.clientY - lightboxDragStartY);
+    applyLightboxTransform();
+  });
+
+  function endLightboxDrag() {
+    lightboxDragging = false;
+    lightboxImg.classList.remove('dragging');
+  }
+
+  lightboxImg.addEventListener('pointerup', endLightboxDrag);
+  lightboxImg.addEventListener('pointercancel', endLightboxDrag);
 
   // ---- Messages from extension host ----
 

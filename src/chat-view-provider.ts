@@ -196,6 +196,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <div id="lightbox" class="hidden">
           <img id="lightbox-img" src="" alt="Preview">
           <button id="lightbox-close">&times;</button>
+          <div id="lightbox-zoom">100%</div>
         </div>
         <script src="${scriptUri}"></script>
       </body>

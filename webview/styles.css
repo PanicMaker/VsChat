@@ -510,6 +510,27 @@ body.mode-git #attach-btn:hover {
   max-width: 90%;
   max-height: 90%;
   border-radius: 8px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  transform-origin: center center;
+}
+
+#lightbox-img.dragging {
+  cursor: grabbing;
+}
+
+#lightbox-zoom {
+  position: absolute;
+  bottom: 16px;
+  left: 24px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  font-family: var(--vscode-font-family, monospace);
+  pointer-events: none;
 }
 
 #lightbox-close {
