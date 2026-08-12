@@ -188,10 +188,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <div id="messages"></div>
         </div>
         <div id="input-bar">
+          <button id="emoji-btn" title="Emoji">😊</button>
           <button id="attach-btn" title="Attach">&#x1F4CE;</button>
           <input type="file" id="file-input" accept="image/*" class="hidden">
           <input type="text" id="text-input" placeholder="Type a message...">
           <button id="send-btn">Send</button>
+          <div id="emoji-panel" class="hidden"></div>
         </div>
         <div id="lightbox" class="hidden">
           <img id="lightbox-img" src="" alt="Preview">

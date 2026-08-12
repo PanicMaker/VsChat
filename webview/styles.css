@@ -192,6 +192,7 @@ body.mode-chat #input-bar {
   display: flex;
   gap: 8px;
   padding: 12px;
+  position: relative;
   background: var(--vscode-editor-background, #1e1e1e);
   border-top: 1px solid var(--vscode-panel-border, #333);
 }
@@ -212,7 +213,8 @@ body.mode-chat #text-input:focus {
 }
 
 body.mode-chat #send-btn,
-body.mode-chat #attach-btn {
+body.mode-chat #attach-btn,
+body.mode-chat #emoji-btn {
   padding: 8px 16px;
   border: none;
   border-radius: 6px;
@@ -238,6 +240,51 @@ body.mode-chat #attach-btn {
 }
 
 body.mode-chat #attach-btn:hover {
+  background: var(--vscode-list-hoverBackground, #2a2d2e);
+}
+
+body.mode-chat #emoji-btn {
+  background: transparent;
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  padding: 8px 8px;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+
+body.mode-chat #emoji-btn:hover {
+  background: var(--vscode-list-hoverBackground, #2a2d2e);
+}
+
+#emoji-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 12px;
+  width: 320px;
+  max-height: 224px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+  padding: 8px;
+  background: var(--vscode-editorWidget-background, #252526);
+  border: 1px solid var(--vscode-widget-border, #454545);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 10;
+}
+
+#emoji-panel .emoji {
+  font-size: 20px;
+  line-height: 1;
+  text-align: center;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#emoji-panel .emoji:hover {
   background: var(--vscode-list-hoverBackground, #2a2d2e);
 }
 
@@ -319,6 +366,7 @@ body.mode-log #input-bar {
   display: flex;
   gap: 4px;
   padding: 4px 8px;
+  position: relative;
   background: var(--vscode-editor-background, #1e1e1e);
   border-top: 1px solid var(--vscode-panel-border, #333);
 }
@@ -361,6 +409,22 @@ body.mode-log #attach-btn {
 }
 
 body.mode-log #attach-btn:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+body.mode-log #emoji-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+body.mode-log #emoji-btn:hover {
   color: var(--vscode-editor-foreground, #d4d4d4);
 }
 
@@ -445,6 +509,7 @@ body.mode-git #input-bar {
   display: flex;
   gap: 4px;
   padding: 4px 8px;
+  position: relative;
   background: var(--vscode-editor-background, #1e1e1e);
   border-top: 1px solid var(--vscode-panel-border, #333);
 }
@@ -487,6 +552,22 @@ body.mode-git #attach-btn {
 }
 
 body.mode-git #attach-btn:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+body.mode-git #emoji-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+body.mode-git #emoji-btn:hover {
   color: var(--vscode-editor-foreground, #d4d4d4);
 }
 

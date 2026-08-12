@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.3.0-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.4.0-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中直接与微信联系人聊天。基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin) 构建，支持文本消息和图片的收发。
@@ -30,7 +30,6 @@ VsChat/
 │   ├── chat-db.ts                # SQLite 数据库：消息与元数据持久化
 │   └── types.ts                  # 类型定义：消息、API 响应等接口
 ├── webview/                      # Webview 前端（纯 HTML/CSS/JS）
-│   ├── index.html                # 聊天界面 HTML 结构
 │   ├── main.js                   # 前端逻辑：消息渲染、事件处理
 │   └── styles.css                # 聊天界面样式（适配 VSCode 主题）
 ├── dist/                         # TypeScript 编译输出

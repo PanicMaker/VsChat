@@ -2,7 +2,7 @@
   "name": "vschat",
   "displayName": "VsChat",
   "description": "Chat with WeChat contacts via iLink protocol in VSCode",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "PanicMaker",
   "repository": {
     "type": "git",

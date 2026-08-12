@@ -3,6 +3,8 @@
   const messagesEl = document.getElementById('messages');
   const textInput = document.getElementById('text-input');
   const sendBtn = document.getElementById('send-btn');
+  const emojiBtn = document.getElementById('emoji-btn');
+  const emojiPanel = document.getElementById('emoji-panel');
   const attachBtn = document.getElementById('attach-btn');
   const fileInput = document.getElementById('file-input');
   const loginScreen = document.getElementById('login-screen');
@@ -55,6 +57,7 @@
     document.body.className = `mode-${mode}`;
     textInput.placeholder = MODE_PLACEHOLDERS[mode];
     sendBtn.textContent = MODE_SEND_LABELS[mode];
+    emojiPanel?.classList.add('hidden');
     vscode.setState({ mode });
 
     // Update toolbar button active state
@@ -313,6 +316,54 @@
       reader.readAsDataURL(file);
     }
     fileInput.value = '';
+  });
+
+  // ---- Emoji picker ----
+
+  const EMOJIS = [
+    '😀', '😁', '😂', '🤣', '😊', '😉', '😍', '😘',
+    '😜', '🤪', '🤔', '🤨', '😎', '🥳', '😭', '😡',
+    '👍', '👎', '👏', '🙏', '🤝', '💪', '✌️', '🤞',
+    '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💯',
+    '🎉', '🎊', '🎂', '🌹', '🌸', '⭐', '🔥', '✨',
+    '☀️', '🌈', '🍎', '🍺', '☕', '🐶', '🐱', '🐼',
+  ];
+
+  emojiPanel.innerHTML = EMOJIS.map((e) => `<span class="emoji">${e}</span>`).join('');
+
+  function insertEmoji(emoji) {
+    const start = textInput.selectionStart ?? textInput.value.length;
+    const end = textInput.selectionEnd ?? textInput.value.length;
+    textInput.value = textInput.value.slice(0, start) + emoji + textInput.value.slice(end);
+    textInput.focus();
+    const pos = start + emoji.length;
+    textInput.setSelectionRange(pos, pos);
+  }
+
+  function closeEmojiPanel() {
+    emojiPanel.classList.add('hidden');
+  }
+
+  emojiBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    emojiPanel.classList.toggle('hidden');
+  });
+
+  emojiPanel.addEventListener('click', (e) => {
+    const cell = e.target.closest('.emoji');
+    if (!cell) return;
+    insertEmoji(cell.textContent);
+    closeEmojiPanel();
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#emoji-panel') && !e.target.closest('#emoji-btn')) {
+      closeEmojiPanel();
+    }
+  });
+
+  textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeEmojiPanel();
   });
 
   lightboxClose.addEventListener('click', () => {
