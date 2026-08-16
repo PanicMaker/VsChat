@@ -98,7 +98,37 @@ export class ChatDB {
       [limit]
     );
     if (!results.length || !results[0].values.length) return [];
-    return results[0].values.map((row: (number | string | Uint8Array | null)[]) => ({
+    return this.mapRows(results[0].values);
+  }
+
+  // Look up a message by its iLink message id (used to resolve quoted text
+  // when the inbound ref_msg omits text_item — which iLink usually does)
+  async findByMessageId(messageId: string): Promise<ChatMessage | null> {
+    if (!this.db) return null;
+    const results = this.db.exec(
+      `SELECT id, direction, type, content, timestamp, context_token, from_user_id, to_user_id, message_id, reply_to
+       FROM messages WHERE message_id = ? ORDER BY id DESC LIMIT 1`,
+      [messageId]
+    );
+    if (!results.length || !results[0].values.length) return null;
+    return this.mapRows(results[0].values)[0];
+  }
+
+  // Fallback lookup for quote resolution: iLink ref_msg may carry only a
+  // timestamp (no text, and the id may be a peer-side id we never stored).
+  async findByTimestamp(timestamp: number, windowSec: number = 2): Promise<ChatMessage | null> {
+    if (!this.db) return null;
+    const results = this.db.exec(
+      `SELECT id, direction, type, content, timestamp, context_token, from_user_id, to_user_id, message_id, reply_to
+       FROM messages WHERE timestamp BETWEEN ? AND ? ORDER BY id DESC LIMIT 1`,
+      [timestamp - windowSec, timestamp + windowSec]
+    );
+    if (!results.length || !results[0].values.length) return null;
+    return this.mapRows(results[0].values)[0];
+  }
+
+  private mapRows(rows: (number | string | Uint8Array | null)[][]): ChatMessage[] {
+    return rows.map((row: (number | string | Uint8Array | null)[]) => ({
       id: row[0] as number,
       direction: row[1] as 'sent' | 'received',
       type: row[2] as MsgTypeValue,

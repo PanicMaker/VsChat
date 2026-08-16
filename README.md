@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.5.0-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.5.1-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中直接与微信联系人聊天。基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin) 构建，支持文本消息和图片的收发。

@@ -6,6 +6,7 @@
 
 - 单会话：`from_user_id` / `to_user_id` 存在 DB metadata 中，全局只有一对
 - 消息类型只实现文本（type 1）和图片（type 2），语音/文件/视频有类型定义但走 JSON 兜底渲染
+- 引用回复已实现（v0.5.0）：入站解析 `ref_msg`（含 `item.extra.ref_msg` 兼容），出站携带标准 `ref_msg`
 - `markdown-it` 已依赖但未使用
 - `loadMoreHistory` 是留了注释的空 stub
 - 聊天记录为明文 SQLite，无退出即清空选项
@@ -58,7 +59,10 @@
 
 ### 6. 引用 / 回复消息
 
-- 消息右键"引用回复"，前端渲染引用块
+- ✅ 已实现（v0.5.0）：hover ↩ 按钮 → 引用条 → 发送；气泡内渲染引用块，点击跳转
+- 入站引用：iLink 引用消息通常省略 `text_item`，只带 `msg_id`/时间戳；实现按 `text_item → title → 本地 message_id → 本地时间戳(±2s)` 逐级回填
+- 出站引用：**已知平台限制** —— iLink/微信客户端不渲染 bot 发送的 `ref_msg`（消息正常投递但无引用条；`item.ref_msg` 与 `item.extra.ref_msg` 两种位置均实测无效，社区亦无成功先例）。保留标准位置字段，未来平台支持后自动生效
+- 技术要点：微信端消息 ID 是顶层 `message_id`（i64），JS `JSON.parse` 会丢精度，需从原始响应文本提取精确字符串；`item.msg_id` 的 `v1:` 前缀是 iLink 内部 ID，不可用于引用
 
 ### 7. 消息搜索
 

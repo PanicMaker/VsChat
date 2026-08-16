@@ -26,6 +26,19 @@ function aesEcbPaddedSize(plaintextSize: number): number {
   return Math.ceil((plaintextSize + 1) / 16) * 16;
 }
 
+// Recover exact i64 message_id strings from raw JSON: JSON.parse silently rounds
+// numbers above Number.MAX_SAFE_INTEGER, and iLink quote-replies echo these ids
+// back as exact strings, so precision must be preserved.
+function extractExactMessageIds(raw: string): string[] {
+  const out: string[] = [];
+  const re = /"message_id"\s*:\s*(\d+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw))) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
 const BASE_URL = 'https://ilinkai.weixin.qq.com';
 
 function randomUin(): string {
@@ -41,6 +54,7 @@ export class VsChatClient extends vscode.Disposable {
   private reconnectDelay: number = 1000;
   private maxReconnectDelay: number = 30000;
   private _connected: boolean = false;
+  private outboundMsgCounter: number = 0;
 
   private _onMessage = new vscode.EventEmitter<ChatMessage>();
   readonly onMessage = this._onMessage.event;
@@ -88,7 +102,7 @@ export class VsChatClient extends vscode.Disposable {
     return this._cachedProxyAgent;
   }
 
-  private async request<T>(urlPath: string, init?: RequestInit): Promise<T> {
+  private async requestRaw(urlPath: string, init?: RequestInit): Promise<{ json: any; text: string }> {
     const url = `${this.botBaseUrl}${urlPath}`;
     const agent = this.getProxyAgent();
     const method = (init?.method || 'GET').toUpperCase();
@@ -114,11 +128,34 @@ export class VsChatClient extends vscode.Disposable {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    return (await response.json()) as T;
+    const text = await response.text();
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = undefined;
+    }
+    return { json, text };
+  }
+
+  private async request<T>(urlPath: string, init?: RequestInit): Promise<T> {
+    const { json } = await this.requestRaw(urlPath, init);
+    return json as T;
   }
 
   get connected(): boolean {
     return this._connected;
+  }
+
+  // iLink preserves a Hub/sender-assigned message_id verbatim and echoes it back
+  // as ref_msg.message_item.msg_id when the peer quotes the message (verified in
+  // ilink-hub). Match the magnitude (~unix_millis * 1e6) confirmed to be
+  // preserved by the live iLink service. JS Number loses some low bits at this
+  // magnitude, but the rounding is deterministic, so the value we store locally
+  // always equals the string iLink echoes back.
+  private nextMessageId(): string {
+    const counter = this.outboundMsgCounter++ % 1000000;
+    return String(Date.now() * 1000000 + counter);
   }
 
   async login(): Promise<void> {
@@ -254,7 +291,7 @@ export class VsChatClient extends vscode.Disposable {
       try {
         const cursor = await this.db.getMetadata('last_cursor') || '';
         log.info('Polling getupdates, cursor length:', cursor.length);
-        const res = await this.request<GetUpdatesResponse>('/ilink/bot/getupdates', {
+        const raw = await this.requestRaw('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
             get_updates_buf: cursor,
@@ -262,9 +299,15 @@ export class VsChatClient extends vscode.Disposable {
           }),
           signal: this.pollingAbort?.signal,
         });
+        const res = raw.json as GetUpdatesResponse;
         log.info('getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
 
         if (res.msgs && res.msgs.length > 0) {
+          // Re-attach exact message_id strings (in order) before processing
+          const exactIds = extractExactMessageIds(raw.text);
+          res.msgs.forEach((msg, i) => {
+            if (exactIds[i]) msg._exactMessageId = exactIds[i];
+          });
           await this.processMessages(res.msgs);
         }
 
@@ -285,8 +328,10 @@ export class VsChatClient extends vscode.Disposable {
 
   private async processMessages(msgs: ILinkMessage[]): Promise<void> {
     for (const msg of msgs) {
+      // Log the full envelope so we can inspect peer-side id fields (msg.message_id,
+      // item.msg_id, item.extra) when debugging quote-reply routing
+      log.info('processMessage msg:', JSON.stringify(msg));
       for (const item of msg.item_list) {
-        log.info('processMessage item:', JSON.stringify(item));
         let content = item.text_item?.text || '';
         if (item.type === 2 && item.image_item) {
           content = item.image_item.media?.full_url || JSON.stringify(item);
@@ -294,20 +339,51 @@ export class VsChatClient extends vscode.Disposable {
           content = JSON.stringify(item);
         }
 
-        // Own message id: prefer item-level msg_id, fall back to envelope message_id
+        // Own message id: the peer-side id is the envelope's message_id (i64,
+        // recovered exactly from raw JSON). item.msg_id ("v1:<digits>") is an
+        // iLink-internal id and must NOT be used for quote-replies.
         const itemAny = item as any;
-        const ownMessageId: string =
-          item.msg_id || itemAny.message_id?.toString() || itemAny.extra?.msg_id || msg.message_id?.toString() || '';
+        const rawOwnMessageId: string =
+          msg._exactMessageId ||
+          item.msg_id ||
+          itemAny.message_id?.toString() ||
+          itemAny.extra?.msg_id ||
+          msg.message_id?.toString() ||
+          '';
+        const ownMessageId: string = rawOwnMessageId.replace(/^v1:/, '');
 
         // Quoted message: iLink nests it under item.extra.ref_msg (some clients flatten to item.ref_msg)
         const refAny = itemAny.extra?.ref_msg ?? itemAny.ref_msg;
         let replyToJson: string | null = null;
         if (refAny) {
           const refItem = refAny.message_item ?? {};
-          const refText = refItem.text_item?.text ?? '';
+          // iLink usually omits text_item in quote-replies; fall back to the
+          // title summary, then to the locally-stored message content
+          let refText = refItem.text_item?.text ?? '';
+          if (!refText && typeof refAny.title === 'string') {
+            refText = refAny.title;
+          }
+          const refMsgId = refItem.msg_id ?? '';
+          let refType = refItem.type ?? 0;
+          if (!refText && refMsgId) {
+            const local = await this.db.findByMessageId(String(refMsgId));
+            if (local) {
+              refText = local.type === 1 ? local.content : '';
+              refType = refItem.type ?? local.type;
+            }
+          }
+          // Some quote-replies carry neither text nor a locally-matching id; fall
+          // back to the quoted message timestamp (same ±window trick as ilink-hub)
+          if (!refText && refItem.create_time_ms) {
+            const localTs = await this.db.findByTimestamp(Math.floor(refItem.create_time_ms / 1000));
+            if (localTs) {
+              refText = localTs.type === 1 ? localTs.content : '';
+              refType = refItem.type ?? localTs.type;
+            }
+          }
           replyToJson = JSON.stringify({
-            messageId: refItem.msg_id ?? '',
-            type: refItem.type ?? 0,
+            messageId: refMsgId,
+            type: refType,
             text: refText,
             timestamp: refItem.create_time_ms ? Math.floor(refItem.create_time_ms / 1000) : undefined,
           });
@@ -415,18 +491,25 @@ export class VsChatClient extends vscode.Disposable {
       throw new Error('No conversation partner — wait for an incoming message first');
     }
 
+    const msgId = this.nextMessageId();
     const item: any = { type: 1, text_item: { text } };
     if (replyTo?.messageId) {
+      const refMsgId = replyTo.messageId.replace(/^v1:/, '');
       const refItem: any = {
         type: replyTo.type ?? MsgType.Text,
-        msg_id: replyTo.messageId,
+        msg_id: refMsgId,
+        is_completed: true,
       };
       if (replyTo.text) refItem.text_item = { text: replyTo.text };
       if (replyTo.timestamp) refItem.create_time_ms = Math.round(replyTo.timestamp * 1000);
-      item.ref_msg = {
+      const refMsg: any = {
         message_item: refItem,
         title: replyTo.text || '',
       };
+      // Per official iLink TS types. Note: as of iLink/WeChat current behavior,
+      // outbound quote-replies are delivered without a visible quote on the
+      // WeChat client (server accepts the message but ignores/strips ref_msg).
+      item.ref_msg = refMsg;
     }
 
     const payload = {
@@ -434,6 +517,7 @@ export class VsChatClient extends vscode.Disposable {
         to_user_id: fromId,
         from_user_id: toId,
         client_id: `vschat-${crypto.randomUUID()}`,
+        message_id: Number(msgId),
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
@@ -442,6 +526,7 @@ export class VsChatClient extends vscode.Disposable {
       base_info: { channel_version: '2.4.3' },
     };
 
+    log.info('sendText payload:', JSON.stringify(payload));
     await this.request('/ilink/bot/sendmessage', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -455,9 +540,10 @@ export class VsChatClient extends vscode.Disposable {
       context_token: lastCursor,
       from_user_id: toId,
       to_user_id: fromId,
+      message_id: msgId,
       reply_to: replyTo
         ? JSON.stringify({
-            messageId: replyTo.messageId,
+            messageId: replyTo.messageId.replace(/^v1:/, ''),
             type: replyTo.type ?? MsgType.Text,
             text: replyTo.text ?? '',
             timestamp: replyTo.timestamp,
@@ -539,11 +625,13 @@ export class VsChatClient extends vscode.Disposable {
     log.info('Image uploaded, downloadParam length=', downloadEncryptedParam.length);
 
     // Send message with image reference (matching official openclaw-weixin format)
+    const msgId = this.nextMessageId();
     const payload = {
       msg: {
         to_user_id: fromId,
         from_user_id: toId,
         client_id: `vschat-${crypto.randomUUID()}`,
+        message_id: Number(msgId),
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
@@ -577,6 +665,7 @@ export class VsChatClient extends vscode.Disposable {
       context_token: lastCursor,
       from_user_id: toId,
       to_user_id: fromId,
+      message_id: msgId,
     };
 
     const id = await this.db.insertMessage(chatMsg);

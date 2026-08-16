@@ -37,6 +37,9 @@ export interface ILinkMessage {
   context_token: string;
   item_list: MsgItem[];
   message_id?: number;
+  // Exact string form of the peer-side message_id recovered from the raw JSON
+  // body (i64 overflows JS numbers, so JSON.parse loses precision)
+  _exactMessageId?: string;
 }
 
 // Internal message representation for UI and storage

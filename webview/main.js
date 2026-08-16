@@ -156,6 +156,19 @@
     return typeLabel || '[消息]';
   }
 
+  function normalizeMsgId(id) {
+    return String(id || '').replace(/^v1:/, '');
+  }
+
+  // Resolve quoted text from locally stored messages when the server omitted it
+  function localQuoteText(messageId) {
+    if (!messageId) return '';
+    const found = allMessages.find(
+      (m) => m.message_id && normalizeMsgId(m.message_id) === normalizeMsgId(messageId)
+    );
+    return found && found.type === 1 ? found.content : '';
+  }
+
   function setQuote(msg) {
     if (!msg || !msg.message_id) return;
     quoteTarget = {
@@ -183,7 +196,13 @@
 
   function scrollToMessage(messageId) {
     if (!messageId) return;
-    const targetEl = messagesEl.querySelector(`[data-msgid="${CSS.escape(String(messageId))}"]`);
+    let targetEl = messagesEl.querySelector(`[data-msgid="${CSS.escape(String(messageId))}"]`);
+    if (!targetEl) {
+      const found = allMessages.find(
+        (m) => m.message_id && normalizeMsgId(m.message_id) === normalizeMsgId(messageId)
+      );
+      if (found) targetEl = messagesEl.querySelector(`[data-id="${found.id}"]`);
+    }
     if (targetEl) {
       targetEl.scrollIntoView({ block: 'center' });
       targetEl.classList.add('highlight-flash');
@@ -243,7 +262,10 @@
     if (reply) {
       const quoteEl = document.createElement('div');
       quoteEl.className = 'quote-preview';
-      quoteEl.textContent = replyPreviewLabel(reply);
+      quoteEl.textContent = replyPreviewLabel({
+        ...reply,
+        text: reply.text || localQuoteText(reply.messageId),
+      });
       quoteEl.title = '跳转到被引用的消息';
       quoteEl.addEventListener('click', (e) => {
         e.stopPropagation();
