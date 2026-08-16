@@ -17,6 +17,15 @@ export interface MsgItem {
   voice_item?: { transcription: string };
   file_item?: { file_name: string; file_size: number; cdn_url: string };
   video_item?: { aes_key: string; cdn_url: string };
+  msg_id?: string;
+  create_time_ms?: number;
+  ref_msg?: RefMessage;
+}
+
+// Quoted (referenced) message, per iLink protocol
+export interface RefMessage {
+  message_item?: MsgItem;
+  title?: string; // 摘要
 }
 
 // Raw message from iLink API
@@ -27,6 +36,7 @@ export interface ILinkMessage {
   message_state: number;
   context_token: string;
   item_list: MsgItem[];
+  message_id?: number;
 }
 
 // Internal message representation for UI and storage
@@ -39,6 +49,16 @@ export interface ChatMessage {
   context_token: string;
   from_user_id: string;
   to_user_id: string;
+  message_id?: string; // iLink msg id (only for received messages)
+  reply_to?: string | null; // JSON: { messageId, type, text, timestamp }
+}
+
+// Outbound quote reference (from WebView to extension host)
+export interface ReplyTo {
+  messageId: string;
+  type?: MsgTypeValue;
+  text?: string;
+  timestamp?: number; // seconds
 }
 
 // Message from WebView to extension host
@@ -49,6 +69,7 @@ export interface WebViewOutbound {
   imageData?: string; // base64 data URL for images from WebView
   fileName?: string;
   url?: string;
+  replyTo?: ReplyTo;
 }
 
 // Message from extension host to WebView

@@ -12,6 +12,9 @@
   const qrcodeImg = document.getElementById('qrcode');
   const chatContainer = document.getElementById('chat-container');
   const inputBar = document.getElementById('input-bar');
+  const quoteBar = document.getElementById('quote-bar');
+  const quotePreview = document.getElementById('quote-preview');
+  const quoteCancel = document.getElementById('quote-cancel');
   const lightbox = document.getElementById('lightbox');
   const lightboxImg = document.getElementById('lightbox-img');
   const lightboxClose = document.getElementById('lightbox-close');
@@ -39,6 +42,7 @@
   let currentMode = 'chat';
   let hasPartner = false;
   let allMessages = []; // keep messages for re-render on mode switch
+  let quoteTarget = null; // { messageId, type, text, timestamp }
 
   // Restore saved mode
   const saved = vscode.getState();
@@ -58,6 +62,7 @@
     textInput.placeholder = MODE_PLACEHOLDERS[mode];
     sendBtn.textContent = MODE_SEND_LABELS[mode];
     emojiPanel?.classList.add('hidden');
+    updateQuoteBar();
     vscode.setState({ mode });
 
     // Update toolbar button active state
@@ -132,6 +137,60 @@
     return `${prefix} ${time} `;
   }
 
+  // ---- Quote / reply helpers ----
+
+  function parseReplyTo(msg) {
+    if (!msg || !msg.reply_to) return null;
+    try {
+      const parsed = JSON.parse(msg.reply_to);
+      return parsed && (parsed.messageId || parsed.text) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function replyPreviewLabel(reply) {
+    if (!reply) return '';
+    if (reply.text) return reply.text;
+    const typeLabel = { 2: '[图片]', 3: '[语音]', 4: '[文件]', 5: '[视频]' }[reply.type];
+    return typeLabel || '[消息]';
+  }
+
+  function setQuote(msg) {
+    if (!msg || !msg.message_id) return;
+    quoteTarget = {
+      messageId: msg.message_id,
+      type: msg.type,
+      text: msg.type === 1 ? msg.content : '',
+      timestamp: msg.timestamp,
+    };
+    updateQuoteBar();
+    textInput.focus();
+  }
+
+  function clearQuote() {
+    quoteTarget = null;
+    updateQuoteBar();
+  }
+
+  function updateQuoteBar() {
+    const visible = currentMode === 'chat' && quoteTarget;
+    quoteBar.classList.toggle('hidden', !visible);
+    if (visible) {
+      quotePreview.textContent = `回复: ${replyPreviewLabel(quoteTarget)}`;
+    }
+  }
+
+  function scrollToMessage(messageId) {
+    if (!messageId) return;
+    const targetEl = messagesEl.querySelector(`[data-msgid="${CSS.escape(String(messageId))}"]`);
+    if (targetEl) {
+      targetEl.scrollIntoView({ block: 'center' });
+      targetEl.classList.add('highlight-flash');
+      setTimeout(() => targetEl.classList.remove('highlight-flash'), 1200);
+    }
+  }
+
   function insertDateSeparator(timestamp) {
     const dateKey = getDateKey(timestamp);
     if (dateKey !== lastRenderedDate) {
@@ -152,6 +211,7 @@
     const div = document.createElement('div');
     div.className = `message ${msg.direction}`;
     div.dataset.id = msg.id;
+    if (msg.message_id) div.dataset.msgid = msg.message_id;
 
     if (currentMode === 'chat') {
       renderChatMode(div, msg);
@@ -161,11 +221,37 @@
       renderGitMode(div, msg);
     }
 
+    // Quote-reply action (Chat mode only, needs a server-side message id)
+    if (currentMode === 'chat' && msg.message_id) {
+      const quoteBtn = document.createElement('button');
+      quoteBtn.className = 'quote-action';
+      quoteBtn.title = '引用回复';
+      quoteBtn.textContent = '↩';
+      quoteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setQuote(msg);
+      });
+      div.appendChild(quoteBtn);
+    }
+
     messagesEl.appendChild(div);
     scrollToBottom();
   }
 
   function renderChatMode(div, msg) {
+    const reply = parseReplyTo(msg);
+    if (reply) {
+      const quoteEl = document.createElement('div');
+      quoteEl.className = 'quote-preview';
+      quoteEl.textContent = replyPreviewLabel(reply);
+      quoteEl.title = '跳转到被引用的消息';
+      quoteEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        scrollToMessage(reply.messageId);
+      });
+      div.appendChild(quoteEl);
+    }
+
     if (msg.type === 1) {
       const textEl = document.createElement('div');
       textEl.textContent = msg.content;
@@ -185,6 +271,14 @@
     prefixEl.textContent = formatLogPrefix(msg);
     div.appendChild(prefixEl);
 
+    const reply = parseReplyTo(msg);
+    if (reply) {
+      const refEl = document.createElement('span');
+      refEl.className = 'quote-inline';
+      refEl.textContent = `[引用: ${replyPreviewLabel(reply)}] `;
+      div.appendChild(refEl);
+    }
+
     if (msg.type === 1) {
       const textEl = document.createElement('span');
       textEl.className = 'msg-text';
@@ -200,6 +294,14 @@
     prefixEl.className = 'timestamp';
     prefixEl.textContent = formatGitPrefix(msg);
     div.appendChild(prefixEl);
+
+    const reply = parseReplyTo(msg);
+    if (reply) {
+      const refEl = document.createElement('span');
+      refEl.className = 'quote-inline';
+      refEl.textContent = `[引用: ${replyPreviewLabel(reply)}] `;
+      div.appendChild(refEl);
+    }
 
     if (msg.type === 1) {
       const textEl = document.createElement('span');
@@ -286,8 +388,15 @@
   sendBtn.addEventListener('click', () => {
     const text = textInput.value.trim();
     if (text) {
-      vscode.postMessage({ command: 'sendMessage', text });
+      const replyTo = quoteTarget ? {
+        messageId: quoteTarget.messageId,
+        type: quoteTarget.type,
+        text: quoteTarget.text,
+        timestamp: quoteTarget.timestamp,
+      } : undefined;
+      vscode.postMessage({ command: 'sendMessage', text, replyTo });
       textInput.value = '';
+      clearQuote();
     }
   });
 
@@ -299,6 +408,7 @@
   });
 
   attachBtn.addEventListener('click', () => {
+    clearQuote();
     fileInput.click();
   });
 
@@ -368,6 +478,10 @@
 
   lightboxClose.addEventListener('click', () => {
     closeLightbox();
+  });
+
+  quoteCancel.addEventListener('click', () => {
+    clearQuote();
   });
 
   lightbox.addEventListener('click', (e) => {

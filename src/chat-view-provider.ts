@@ -93,7 +93,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleWebViewMessage(msg: WebViewOutbound): Promise<void> {
     try {
       if (msg.command === 'sendMessage' && msg.text) {
-        await this.client.sendText(msg.text);
+        await this.client.sendText(msg.text, msg.replyTo);
       } else if (msg.command === 'sendImage' && msg.imageData) {
         const tempDir = path.join(this.context.globalStorageUri.fsPath, 'temp');
         fs.mkdirSync(tempDir, { recursive: true });
@@ -188,6 +188,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <div id="messages"></div>
         </div>
         <div id="input-bar">
+          <div id="quote-bar" class="hidden">
+            <div id="quote-preview"></div>
+            <button id="quote-cancel" title="取消引用">&times;</button>
+          </div>
           <button id="emoji-btn" title="Emoji">😊</button>
           <button id="attach-btn" title="Attach">&#x1F4CE;</button>
           <input type="file" id="file-input" accept="image/*" class="hidden">

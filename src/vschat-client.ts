@@ -14,6 +14,7 @@ import {
   QRCodeResponse,
   QRCodeStatusResponse,
   GetUpdatesResponse,
+  ReplyTo,
 } from './types';
 
 function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
@@ -293,6 +294,25 @@ export class VsChatClient extends vscode.Disposable {
           content = JSON.stringify(item);
         }
 
+        // Own message id: prefer item-level msg_id, fall back to envelope message_id
+        const itemAny = item as any;
+        const ownMessageId: string =
+          item.msg_id || itemAny.message_id?.toString() || itemAny.extra?.msg_id || msg.message_id?.toString() || '';
+
+        // Quoted message: iLink nests it under item.extra.ref_msg (some clients flatten to item.ref_msg)
+        const refAny = itemAny.extra?.ref_msg ?? itemAny.ref_msg;
+        let replyToJson: string | null = null;
+        if (refAny) {
+          const refItem = refAny.message_item ?? {};
+          const refText = refItem.text_item?.text ?? '';
+          replyToJson = JSON.stringify({
+            messageId: refItem.msg_id ?? '',
+            type: refItem.type ?? 0,
+            text: refText,
+            timestamp: refItem.create_time_ms ? Math.floor(refItem.create_time_ms / 1000) : undefined,
+          });
+        }
+
         const chatMsg: Omit<ChatMessage, 'id'> = {
           direction: 'received',
           type: item.type as MsgTypeValue,
@@ -301,6 +321,8 @@ export class VsChatClient extends vscode.Disposable {
           context_token: msg.context_token,
           from_user_id: msg.from_user_id,
           to_user_id: msg.to_user_id,
+          message_id: ownMessageId || undefined,
+          reply_to: replyToJson,
         };
 
         await this.db.setMetadata('from_user_id', msg.from_user_id);
@@ -382,7 +404,7 @@ export class VsChatClient extends vscode.Disposable {
     this.pollingAbort?.abort();
   }
 
-  async sendText(text: string): Promise<void> {
+  async sendText(text: string, replyTo?: ReplyTo): Promise<void> {
     if (!this._connected) throw new Error('Not connected');
 
     const fromId = await this.db.getMetadata('from_user_id') || '';
@@ -393,6 +415,20 @@ export class VsChatClient extends vscode.Disposable {
       throw new Error('No conversation partner — wait for an incoming message first');
     }
 
+    const item: any = { type: 1, text_item: { text } };
+    if (replyTo?.messageId) {
+      const refItem: any = {
+        type: replyTo.type ?? MsgType.Text,
+        msg_id: replyTo.messageId,
+      };
+      if (replyTo.text) refItem.text_item = { text: replyTo.text };
+      if (replyTo.timestamp) refItem.create_time_ms = Math.round(replyTo.timestamp * 1000);
+      item.ref_msg = {
+        message_item: refItem,
+        title: replyTo.text || '',
+      };
+    }
+
     const payload = {
       msg: {
         to_user_id: fromId,
@@ -401,7 +437,7 @@ export class VsChatClient extends vscode.Disposable {
         message_type: 2,
         message_state: 2,
         context_token: lastCursor,
-        item_list: [{ type: 1, text_item: { text } }],
+        item_list: [item],
       },
       base_info: { channel_version: '2.4.3' },
     };
@@ -419,6 +455,14 @@ export class VsChatClient extends vscode.Disposable {
       context_token: lastCursor,
       from_user_id: toId,
       to_user_id: fromId,
+      reply_to: replyTo
+        ? JSON.stringify({
+            messageId: replyTo.messageId,
+            type: replyTo.type ?? MsgType.Text,
+            text: replyTo.text ?? '',
+            timestamp: replyTo.timestamp,
+          })
+        : null,
     };
 
     const id = await this.db.insertMessage(chatMsg);

@@ -142,6 +142,7 @@ body.mode-chat .message {
   word-wrap: break-word;
   line-height: 1.4;
   font-size: 13px;
+  position: relative;
 }
 
 body.mode-chat .message.sent {
@@ -188,6 +189,64 @@ body.mode-chat .message .image-container.image-sent {
   background: rgba(255, 255, 255, 0.15);
 }
 
+/* Quote action button (shown on hover) */
+body.mode-chat .message .quote-action {
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--vscode-panel-border, #444);
+  border-radius: 50%;
+  background: var(--vscode-editorWidget-background, #2d2d30);
+  color: var(--vscode-descriptionForeground, #aaa);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  z-index: 2;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+body.mode-chat .message:hover .quote-action {
+  display: flex;
+}
+
+body.mode-chat .message .quote-action:hover {
+  background: #0078d4;
+  color: white;
+  border-color: #0078d4;
+}
+
+/* Quoted message preview inside a chat bubble */
+body.mode-chat .message .quote-preview {
+  margin: 0 0 6px;
+  padding: 4px 8px;
+  border-left: 3px solid rgba(255, 255, 255, 0.45);
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+body.mode-chat .message.received .quote-preview {
+  border-left-color: var(--vscode-charts-blue, #0078d4);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+/* Inline quote marker for log / git modes */
+.quote-inline {
+  opacity: 0.65;
+}
+
 body.mode-chat #input-bar {
   display: flex;
   gap: 8px;
@@ -210,6 +269,47 @@ body.mode-chat #text-input {
 
 body.mode-chat #text-input:focus {
   border-color: #0078d4;
+}
+
+/* Quote reply bar above the input row */
+#quote-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: -34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--vscode-editorWidget-background, #252526);
+  border: 1px solid var(--vscode-widget-border, #454545);
+  border-left: 3px solid #0078d4;
+  border-radius: 6px;
+  font-size: 12px;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.25);
+  z-index: 5;
+}
+
+#quote-preview {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--vscode-descriptionForeground, #aaa);
+}
+
+#quote-cancel {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #aaa);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+#quote-cancel:hover {
+  color: var(--vscode-editor-foreground, #d4d4d4);
 }
 
 body.mode-chat #send-btn,
@@ -318,6 +418,16 @@ body.mode-log .message {
 
 body.mode-log .message.sent {
   color: #6a9955; /* green like stdout */
+}
+
+/* Flash highlight when jumping to a quoted message */
+.message.highlight-flash {
+  animation: quote-flash 1.2s ease-out;
+}
+
+@keyframes quote-flash {
+  0% { background-color: rgba(0, 120, 212, 0.35); }
+  100% { background-color: transparent; }
 }
 
 body.mode-log .message.received {
