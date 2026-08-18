@@ -14,6 +14,7 @@ import {
   QRCodeResponse,
   QRCodeStatusResponse,
   GetUpdatesResponse,
+  SendMessageResponse,
   ReplyTo,
 } from './types';
 
@@ -403,6 +404,14 @@ export class VsChatClient extends vscode.Disposable {
 
         await this.db.setMetadata('from_user_id', msg.from_user_id);
         await this.db.setMetadata('to_user_id', msg.to_user_id);
+        // Track the freshest inbound session token + timestamp so outbound
+        // messages use a valid context token instead of the polling cursor
+        // (the cursor goes stale when no messages arrive for a long time,
+        // and iLink rejects sends with it — ret != 0, silently ignored before)
+        if (msg.context_token) {
+          await this.db.setMetadata('context_token', msg.context_token);
+        }
+        await this.db.setMetadata('last_inbound_ts', String(Math.floor(Date.now() / 1000)));
 
         // For images, fetch and decrypt before firing so webview has the data
         let imageDataUrl: string | undefined;
@@ -480,15 +489,30 @@ export class VsChatClient extends vscode.Disposable {
     this.pollingAbort?.abort();
   }
 
-  async sendText(text: string, replyTo?: ReplyTo): Promise<void> {
+  async sendText(text: string, replyTo?: ReplyTo): Promise<string | undefined> {
     if (!this._connected) throw new Error('Not connected');
 
     const fromId = await this.db.getMetadata('from_user_id') || '';
     const toId = await this.db.getMetadata('to_user_id') || '';
-    const lastCursor = await this.db.getMetadata('last_cursor') || '';
+    const contextToken = (await this.db.getMetadata('context_token'))
+      || (await this.db.getMetadata('last_cursor'))
+      || '';
 
     if (!fromId || !toId) {
       throw new Error('No conversation partner — wait for an incoming message first');
+    }
+
+    // Warn (but do not block) when the session may be stale: no inbound message
+    // for over 24h means the context token is likely expired and iLink may
+    // reject the send (observed: a token went bad ~1h37m after the last inbound
+    // message; new inbound messages refresh it). The ret check below still
+    // surfaces actual rejections.
+    const lastInboundTs = Number(await this.db.getMetadata('last_inbound_ts') || 0);
+    const staleSecs = Math.floor(Date.now() / 1000) - lastInboundTs;
+    let warning: string | undefined;
+    if (lastInboundTs > 0 && staleSecs > 86400) {
+      warning = `会话可能已过期（距上次收到消息约 ${Math.floor(staleSecs / 3600)} 小时），对方可能收不到。发送已继续，建议先让对方发一条消息刷新会话。`;
+      log.info('sendText stale-session warning:', warning);
     }
 
     const msgId = this.nextMessageId();
@@ -520,24 +544,31 @@ export class VsChatClient extends vscode.Disposable {
         message_id: Number(msgId),
         message_type: 2,
         message_state: 2,
-        context_token: lastCursor,
+        context_token: contextToken,
         item_list: [item],
       },
       base_info: { channel_version: '2.4.3' },
     };
 
     log.info('sendText payload:', JSON.stringify(payload));
-    await this.request('/ilink/bot/sendmessage', {
+    const resp = await this.request<SendMessageResponse>('/ilink/bot/sendmessage', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    log.info('sendText response:', JSON.stringify(resp));
+    if (resp && typeof resp.ret === 'number' && resp.ret !== 0) {
+      throw new Error(
+        `WeChat rejected message: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}. ` +
+        `If this is a session/token error, ask the contact to send a message first.`
+      );
+    }
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
       type: MsgType.Text,
       content: text,
       timestamp: Math.floor(Date.now() / 1000),
-      context_token: lastCursor,
+      context_token: contextToken,
       from_user_id: toId,
       to_user_id: fromId,
       message_id: msgId,
@@ -553,17 +584,28 @@ export class VsChatClient extends vscode.Disposable {
 
     const id = await this.db.insertMessage(chatMsg);
     this._onMessage.fire({ ...chatMsg, id });
+    return warning;
   }
 
-  async sendImage(imagePath: string): Promise<void> {
+  async sendImage(imagePath: string): Promise<string | undefined> {
     if (!this._connected) throw new Error('Not connected');
 
     const fromId = await this.db.getMetadata('from_user_id') || '';
     const toId = await this.db.getMetadata('to_user_id') || '';
-    const lastCursor = await this.db.getMetadata('last_cursor') || '';
+    const contextToken = (await this.db.getMetadata('context_token'))
+      || (await this.db.getMetadata('last_cursor'))
+      || '';
 
     if (!fromId || !toId) {
       throw new Error('No conversation partner — wait for an incoming message first');
+    }
+
+    const lastInboundTs = Number(await this.db.getMetadata('last_inbound_ts') || 0);
+    const staleSecs = Math.floor(Date.now() / 1000) - lastInboundTs;
+    let warning: string | undefined;
+    if (lastInboundTs > 0 && staleSecs > 86400) {
+      warning = `会话可能已过期（距上次收到消息约 ${Math.floor(staleSecs / 3600)} 小时），对方可能收不到。发送已继续，建议先让对方发一条消息刷新会话。`;
+      log.info('sendImage stale-session warning:', warning);
     }
 
     // Generate random AES key and file metadata
@@ -634,7 +676,7 @@ export class VsChatClient extends vscode.Disposable {
         message_id: Number(msgId),
         message_type: 2,
         message_state: 2,
-        context_token: lastCursor,
+        context_token: contextToken,
         item_list: [
           {
             type: 2,
@@ -652,17 +694,24 @@ export class VsChatClient extends vscode.Disposable {
       base_info: { channel_version: '2.4.3' },
     };
 
-    await this.request('/ilink/bot/sendmessage', {
+    const resp = await this.request<SendMessageResponse>('/ilink/bot/sendmessage', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    log.info('sendImage response:', JSON.stringify(resp));
+    if (resp && typeof resp.ret === 'number' && resp.ret !== 0) {
+      throw new Error(
+        `WeChat rejected image: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}. ` +
+        `If this is a session/token error, ask the contact to send a message first.`
+      );
+    }
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
       type: MsgType.Image,
       content: '[Image]',
       timestamp: Math.floor(Date.now() / 1000),
-      context_token: lastCursor,
+      context_token: contextToken,
       from_user_id: toId,
       to_user_id: fromId,
       message_id: msgId,
@@ -670,6 +719,7 @@ export class VsChatClient extends vscode.Disposable {
 
     const id = await this.db.insertMessage(chatMsg);
     this._onMessage.fire({ ...chatMsg, id });
+    return warning;
   }
 
   // iLink protocol requires AES-128-ECB for media encryption

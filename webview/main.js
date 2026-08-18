@@ -616,6 +616,18 @@
           scrollToBottom();
         }
         break;
+
+      case 'warning':
+        if (message.warning) {
+          const warnDiv = document.createElement('div');
+          warnDiv.className = 'message received warning-message';
+          warnDiv.textContent = currentMode === 'chat'
+            ? `⚠ ${message.warning}`
+            : `[WARN] ${message.warning}`;
+          messagesEl.appendChild(warnDiv);
+          scrollToBottom();
+        }
+        break;
     }
   });
 })();

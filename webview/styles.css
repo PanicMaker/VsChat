@@ -430,6 +430,15 @@ body.mode-log .message.sent {
   100% { background-color: transparent; }
 }
 
+/* Non-blocking session warnings (stale context token etc.) */
+.message.warning-message {
+  color: #cca700 !important;
+  font-size: 12px;
+  opacity: 0.95;
+  max-width: 100%;
+  align-self: center;
+}
+
 body.mode-log .message.received {
   color: var(--vscode-editor-foreground, #d4d4d4);
 }

@@ -83,6 +83,7 @@ export interface WebViewInbound {
   qrcode?: string; // base64 or URL of QR code image
   status?: string; // login status text
   error?: string;
+  warning?: string; // non-blocking warning (e.g. stale session)
   imageDataUrl?: string | null; // decrypted image data URL for webview
 }
 
@@ -103,4 +104,12 @@ export interface GetUpdatesResponse {
   msgs?: ILinkMessage[];
   get_updates_buf: string;
   longpolling_timeout_ms: number;
+}
+
+// sendMessage response: HTTP 200 does NOT mean the message was accepted —
+// business errors come back as ret != 0 (e.g. expired session token)
+export interface SendMessageResponse {
+  ret?: number;
+  errcode?: number;
+  errmsg?: string;
 }

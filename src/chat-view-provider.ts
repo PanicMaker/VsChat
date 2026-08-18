@@ -93,7 +93,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleWebViewMessage(msg: WebViewOutbound): Promise<void> {
     try {
       if (msg.command === 'sendMessage' && msg.text) {
-        await this.client.sendText(msg.text, msg.replyTo);
+        const warning = await this.client.sendText(msg.text, msg.replyTo);
+        if (warning) this.postMessage({ command: 'warning', warning });
       } else if (msg.command === 'sendImage' && msg.imageData) {
         const tempDir = path.join(this.context.globalStorageUri.fsPath, 'temp');
         fs.mkdirSync(tempDir, { recursive: true });
@@ -107,7 +108,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         try {
           fs.writeFileSync(tempPath, Buffer.from(base64Data, 'base64'));
-          await this.client.sendImage(tempPath);
+          const warning = await this.client.sendImage(tempPath);
+          if (warning) this.postMessage({ command: 'warning', warning });
         } finally {
           try { fs.unlinkSync(tempPath); } catch {}
         }
