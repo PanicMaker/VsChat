@@ -47,6 +47,28 @@ function randomUin(): string {
   return buf.toString('base64');
 }
 
+// iLink sendmessage retry policy (bounded, no retry storm — see hermes-agent
+// issue #26828 for why unbounded retries are dangerous):
+//  - genuine rate limits ("rate limited" / "freq limit") get up to
+//    MAX_RATE_LIMIT_ATTEMPTS total attempts, backing off 1s → 3s → 9s;
+//  - stale context_token ("prepare failed" / "unknown error" / errcode=-14)
+//    gets ONE extra tokenless recovery send instead (hermes-agent #80426).
+const MAX_RATE_LIMIT_ATTEMPTS = 4;
+const RATE_LIMIT_BACKOFF_MS = [1000, 3000, 9000];
+const CONTEXT_TOKEN_STALE_FLAG = 'context_token_stale';
+
+// iLink sendmessage business-error classification:
+//  - 'rate-limit':    genuine throttling
+//  - 'stale-session': expired context_token (recoverable by dropping the token)
+//  - 'other':         anything else (or unparseable response)
+type SendFailureKind = 'rate-limit' | 'stale-session' | 'other';
+
+interface SendAttemptResult {
+  resp: SendMessageResponse | undefined;
+  warning?: string;
+  tokenUsed?: string;
+}
+
 export class VsChatClient extends vscode.Disposable {
   private botToken: string = '';
   private botBaseUrl: string = BASE_URL;
@@ -410,6 +432,9 @@ export class VsChatClient extends vscode.Disposable {
         // and iLink rejects sends with it — ret != 0, silently ignored before)
         if (msg.context_token) {
           await this.db.setMetadata('context_token', msg.context_token);
+          // A fresh inbound session token is available again: re-enable the
+          // normal (non-tokenless) send path after a stale-session recovery.
+          await this.db.setMetadata(CONTEXT_TOKEN_STALE_FLAG, '');
         }
         await this.db.setMetadata('last_inbound_ts', String(Math.floor(Date.now() / 1000)));
 
@@ -491,12 +516,24 @@ export class VsChatClient extends vscode.Disposable {
 
   async sendText(text: string, replyTo?: ReplyTo): Promise<string | undefined> {
     if (!this._connected) throw new Error('Not connected');
+    const result = await this.sendWithRecovery(
+      (opts) => this.sendTextOnce(text, replyTo, opts.tokenless),
+      'message'
+    );
+    return result.warning;
+  }
 
+  // Single outbound send attempt. Classification / bounded retry / tokenless
+  // recovery is handled by sendWithRecovery; on ret != 0 the message is NOT
+  // inserted locally, so a rejected message never looks delivered.
+  private async sendTextOnce(
+    text: string,
+    replyTo: ReplyTo | undefined,
+    tokenless: boolean,
+  ): Promise<SendAttemptResult> {
     const fromId = await this.db.getMetadata('from_user_id') || '';
     const toId = await this.db.getMetadata('to_user_id') || '';
-    const contextToken = (await this.db.getMetadata('context_token'))
-      || (await this.db.getMetadata('last_cursor'))
-      || '';
+    const contextToken = tokenless ? '' : await this.readContextToken();
 
     if (!fromId || !toId) {
       throw new Error('No conversation partner — wait for an incoming message first');
@@ -544,7 +581,9 @@ export class VsChatClient extends vscode.Disposable {
         message_id: Number(msgId),
         message_type: 2,
         message_state: 2,
-        context_token: contextToken,
+        // tokenless recovery (stale session): omit context_token entirely so
+        // the rejected stale value isn't echoed back to iLink
+        ...(tokenless ? {} : { context_token: contextToken }),
         item_list: [item],
       },
       base_info: { channel_version: '2.4.3' },
@@ -556,11 +595,12 @@ export class VsChatClient extends vscode.Disposable {
       body: JSON.stringify(payload),
     });
     log.info('sendText response:', JSON.stringify(resp));
-    if (resp && typeof resp.ret === 'number' && resp.ret !== 0) {
-      throw new Error(
-        `WeChat rejected message: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}. ` +
-        `If this is a session/token error, ask the contact to send a message first.`
-      );
+    // iLink omits `ret` on success (observed: {"message_id":...}); only an
+    // explicit ret != 0 is a business error. HTTP 200 with an unparseable body
+    // (resp undefined) is treated as failure — never insert a message we can't
+    // confirm was accepted.
+    if (!resp || (typeof resp.ret === 'number' && resp.ret !== 0)) {
+      return { resp, warning, tokenUsed: contextToken };
     }
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
@@ -584,17 +624,22 @@ export class VsChatClient extends vscode.Disposable {
 
     const id = await this.db.insertMessage(chatMsg);
     this._onMessage.fire({ ...chatMsg, id });
-    return warning;
+    return { resp, warning, tokenUsed: contextToken };
   }
 
   async sendImage(imagePath: string): Promise<string | undefined> {
     if (!this._connected) throw new Error('Not connected');
+    const result = await this.sendWithRecovery(
+      (opts) => this.sendImageOnce(imagePath, opts.tokenless),
+      'image'
+    );
+    return result.warning;
+  }
 
+  private async sendImageOnce(imagePath: string, tokenless: boolean): Promise<SendAttemptResult> {
     const fromId = await this.db.getMetadata('from_user_id') || '';
     const toId = await this.db.getMetadata('to_user_id') || '';
-    const contextToken = (await this.db.getMetadata('context_token'))
-      || (await this.db.getMetadata('last_cursor'))
-      || '';
+    const contextToken = tokenless ? '' : await this.readContextToken();
 
     if (!fromId || !toId) {
       throw new Error('No conversation partner — wait for an incoming message first');
@@ -676,7 +721,8 @@ export class VsChatClient extends vscode.Disposable {
         message_id: Number(msgId),
         message_type: 2,
         message_state: 2,
-        context_token: contextToken,
+        // tokenless recovery (stale session): omit context_token entirely
+        ...(tokenless ? {} : { context_token: contextToken }),
         item_list: [
           {
             type: 2,
@@ -699,11 +745,9 @@ export class VsChatClient extends vscode.Disposable {
       body: JSON.stringify(payload),
     });
     log.info('sendImage response:', JSON.stringify(resp));
-    if (resp && typeof resp.ret === 'number' && resp.ret !== 0) {
-      throw new Error(
-        `WeChat rejected image: ret=${resp.ret} errmsg=${resp.errmsg || '(none)'}. ` +
-        `If this is a session/token error, ask the contact to send a message first.`
-      );
+    // iLink omits `ret` on success; only an explicit ret != 0 is an error.
+    if (!resp || (typeof resp.ret === 'number' && resp.ret !== 0)) {
+      return { resp, warning, tokenUsed: contextToken };
     }
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
@@ -719,7 +763,117 @@ export class VsChatClient extends vscode.Disposable {
 
     const id = await this.db.insertMessage(chatMsg);
     this._onMessage.fire({ ...chatMsg, id });
-    return warning;
+    return { resp, warning, tokenUsed: contextToken };
+  }
+
+  // Bounded send loop shared by text/image sends:
+  //  - stale context_token → clear it, one tokenless recovery send;
+  //  - genuine rate limit → back off 1s/3s/9s and retry (max 4 attempts);
+  //  - anything else / exhausted retries → throw a classified error.
+  private async sendWithRecovery(
+    attempt: (opts: { tokenless: boolean }) => Promise<SendAttemptResult>,
+    label: string,
+  ): Promise<SendAttemptResult> {
+    let tokenless = false;
+    let last: SendAttemptResult | undefined;
+
+    for (let i = 0; i < MAX_RATE_LIMIT_ATTEMPTS; i++) {
+      const result = await attempt({ tokenless });
+      last = result;
+      const kind = this.classifySendFailure(result.resp);
+      if (kind === null) return result; // confirmed accepted
+
+      if (kind === 'stale-session' && !tokenless) {
+        // iLink rejected the cached context_token (ret=-2 "prepare failed" /
+        // "unknown error", or errcode=-14). Drop it and retry once without a
+        // token — the session itself may still be alive (hermes-agent #80426).
+        tokenless = true;
+        await this.invalidateStaleContextToken(result.tokenUsed || '');
+        log.warn(`send ${label}: stale context_token, retrying without token`);
+        continue;
+      }
+
+      if (kind === 'rate-limit' && i < MAX_RATE_LIMIT_ATTEMPTS - 1) {
+        const delay = RATE_LIMIT_BACKOFF_MS[i] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
+        log.warn(`send ${label}: rate limited, backing off ${delay}ms (attempt ${i + 1}/${MAX_RATE_LIMIT_ATTEMPTS - 1})`);
+        await this.sleep(delay);
+        continue;
+      }
+
+      // Retries exhausted, or a non-recoverable error.
+      throw this.buildSendError(kind, label, result.resp);
+    }
+
+    throw this.buildSendError('other', label, last?.resp);
+  }
+
+  // iLink sendmessage business-error classification. Note the intentional
+  // ordering: "rate limited" / "freq limit" are genuine throttling (issue
+  // #21011); "prepare failed" / "unknown error" / empty errmsg with ret=-2,
+  // and errcode=-14 are stale context_token signals (#80426, #74572).
+  private classifySendFailure(resp: SendMessageResponse | undefined): SendFailureKind | null {
+    if (!resp) return 'other'; // HTTP 200 with unparseable body — unconfirmed delivery
+    // iLink omits `ret` on success (observed: {"message_id":...})
+    if (resp.ret === undefined || resp.ret === 0) return null;
+
+    const errmsg = String(resp.errmsg || '').toLowerCase();
+    const errcode = resp.errcode;
+
+    if (errmsg.includes('freq limit') || errmsg.includes('rate limit')) return 'rate-limit';
+    if (errcode === -14 || resp.ret === -14) return 'stale-session';
+    if (resp.ret === -2 || errcode === -2) {
+      if (!errmsg || errmsg.includes('prepare failed') || errmsg.includes('unknown error')) {
+        return 'stale-session';
+      }
+    }
+    return 'other';
+  }
+
+  // Reads the freshest context_token, falling back to the legacy polling
+  // cursor unless a stale-session recovery marked the cached token invalid.
+  private async readContextToken(): Promise<string> {
+    const fresh = await this.db.getMetadata('context_token');
+    if (fresh) return fresh;
+    // After a stale-session recovery the cached token is invalid; don't fall
+    // back to the polling cursor until a new inbound message refreshes it.
+    if (await this.db.getMetadata(CONTEXT_TOKEN_STALE_FLAG)) return '';
+    return (await this.db.getMetadata('last_cursor')) || '';
+  }
+
+  // Compare-and-delete the failed context_token so a concurrently refreshed
+  // token (new inbound message) is preserved, and mark the cached token invalid
+  // so the legacy last_cursor fallback isn't reused until refresh.
+  private async invalidateStaleContextToken(failedToken: string): Promise<void> {
+    const stored = await this.db.getMetadata('context_token');
+    const cleared = !!stored && stored === failedToken;
+    if (cleared) {
+      await this.db.setMetadata('context_token', '');
+    }
+    if (cleared || !stored) {
+      await this.db.setMetadata(CONTEXT_TOKEN_STALE_FLAG, '1');
+    }
+  }
+
+  private buildSendError(kind: SendFailureKind, label: string, resp: SendMessageResponse | undefined): Error {
+    const detail = resp
+      ? `ret=${resp.ret} errcode=${resp.errcode ?? 'none'} errmsg="${resp.errmsg || ''}"`
+      : 'no response body';
+    switch (kind) {
+      case 'stale-session':
+        return new Error(
+          `WeChat 会话已过期（${detail}）：已丢弃缓存的 context_token 并尝试不带 token 重发，仍被拒绝。` +
+          `请让对方先发一条消息刷新会话后再试。`
+        );
+      case 'rate-limit':
+        return new Error(
+          `WeChat 限流（${detail}）：已退避重试 ${MAX_RATE_LIMIT_ATTEMPTS - 1} 次仍被拒绝。` +
+          `建议等待约 60 秒后重发；若会话已很久没有互动，也可能同时是 token 过期，可让对方先发一条消息。`
+        );
+      default:
+        return new Error(
+          `WeChat rejected ${label}: ${detail}. If this is a session/token error, ask the contact to send a message first.`
+        );
+    }
   }
 
   // iLink protocol requires AES-128-ECB for media encryption

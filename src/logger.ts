@@ -18,6 +18,11 @@ export function info(...args: unknown[]): void {
   getChannel().appendLine(`[${timestamp()}] ${msg}`);
 }
 
+export function warn(...args: unknown[]): void {
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  getChannel().appendLine(`[${timestamp()}] [WARN] ${msg}`);
+}
+
 export function error(...args: unknown[]): void {
   const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
   getChannel().appendLine(`[${timestamp()}] [ERROR] ${msg}`);
