@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.5.2-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.6.0-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中直接与微信联系人聊天。基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin) 构建，支持文本消息和图片的收发。
@@ -18,6 +18,16 @@
 - 💾 **消息持久化** — 基于 SQLite 的本地消息存储，重启后保留历史
 - 🔄 **会话恢复** — 自动恢复上一次登录会话，无需重新扫码
 - 🌐 **代理支持** — 可配置 HTTP 代理
+- 📱 **Bark iPhone 推送** — 收到新消息时推送提醒到 iPhone，不再错过
+
+### 📱 iPhone 推送提醒（Bark）
+
+1. iPhone 安装 [Bark](https://apps.apple.com/cn/app/bark-%E6%8E%A8%E9%80%81/id1403753865) 并获取设备 Key。
+2. 在 VSCode 设置中配置 `vschat.barkUrl`，例如 `https://api.day.app/你的Key/`。
+3. 执行命令 **VsChat: Test Push Notification** 验证手机能否收到通知。
+4. 之后每条收到的微信消息都会触发 iPhone 通知。也支持带 `{title}` / `{message}` 占位符的完整 URL 模板，用于自定义提示音、分组等参数。
+
+> 注意：推送依赖扩展运行，VSCode 窗口需要保持连接（Remote-SSH 不退出）。消息内容超过 500 字符时会截断。
 
 ## 📁 项目结构
 

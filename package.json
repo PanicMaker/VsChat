@@ -2,7 +2,7 @@
   "name": "vschat",
   "displayName": "VsChat",
   "description": "Chat with WeChat contacts via iLink protocol in VSCode",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "publisher": "PanicMaker",
   "repository": {
     "type": "git",
@@ -49,6 +49,10 @@
       {
         "command": "vschat.disconnect",
         "title": "VsChat: Disconnect"
+      },
+      {
+        "command": "vschat.testPush",
+        "title": "VsChat: Test Push Notification"
       }
     ],
     "configuration": {
@@ -63,6 +67,11 @@
           "type": "string",
           "default": "",
           "description": "WeChat contact ID to chat with (e.g., o9cq800kum_xxx@im.wechat). Leave empty to auto-detect."
+        },
+        "vschat.barkUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Bark push URL for iPhone notifications. Use a base URL like https://api.day.app/YOUR_KEY/ or a template containing {title} and {message}. Leave empty to disable."
         }
       }
     }

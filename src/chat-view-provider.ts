@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { VsChatClient } from './vschat-client';
 import { ChatDB } from './chat-db';
 import * as log from './logger';
+import { sendBarkPush } from './push';
 import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -52,10 +53,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.postMessage({ command: 'newMessage', message: chatMsg, imageDataUrl: chatMsg.imageDataUrl });
 
         if (chatMsg.direction === 'received') {
-          vscode.window.showInformationMessage(
-            `WeChat: ${chatMsg.type === 1 ? chatMsg.content : '[Image]'}`,
-            { modal: false }
-          );
+          const preview = chatMsg.type === 1 ? chatMsg.content : '[Image]';
+          vscode.window.showInformationMessage(`WeChat: ${preview}`, { modal: false });
+          void sendBarkPush('WeChat', preview);
         }
       })
     );

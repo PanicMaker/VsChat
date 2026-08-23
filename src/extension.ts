@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ChatDB } from './chat-db';
 import { VsChatClient } from './vschat-client';
 import { ChatViewProvider } from './chat-view-provider';
+import { sendBarkPush } from './push';
 
 let client: VsChatClient | undefined;
 let db: ChatDB | undefined;
@@ -56,6 +57,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (client) {
         await client.logout();
         vscode.window.showInformationMessage('Disconnected from WeChat');
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vschat.testPush', async () => {
+      const ok = await sendBarkPush('VsChat 测试', '如果你在 iPhone 上看到这条消息，Bark 推送已生效！');
+      if (ok) {
+        vscode.window.showInformationMessage('Test push sent — check your iPhone.');
+      } else {
+        vscode.window.showErrorMessage('Test push failed — check the VsChat output log or vschat.barkUrl setting.');
       }
     })
   );
