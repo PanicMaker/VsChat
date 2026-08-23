@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.6.0-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.7.0-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中直接与微信联系人聊天。基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin) 构建，支持文本消息和图片的收发。
@@ -19,6 +19,7 @@
 - 🔄 **会话恢复** — 自动恢复上一次登录会话，无需重新扫码
 - 🌐 **代理支持** — 可配置 HTTP 代理
 - 📱 **Bark iPhone 推送** — 收到新消息时推送提醒到 iPhone，不再错过
+- 🔄 **自动更新** — 基于 GitHub Release 检测新版本，一键下载安装
 
 ### 📱 iPhone 推送提醒（Bark）
 
@@ -28,6 +29,20 @@
 4. 之后每条收到的微信消息都会触发 iPhone 通知。也支持带 `{title}` / `{message}` 占位符的完整 URL 模板，用于自定义提示音、分组等参数。
 
 > 注意：推送依赖扩展运行，VSCode 窗口需要保持连接（Remote-SSH 不退出）。消息内容超过 500 字符时会截断。
+
+### 🔄 自动更新（基于 GitHub Release）
+
+每次向 `main`/`master` 推送时，GitHub Actions 会自动构建 `vschat.vsix` 并发布为 `v{版本号}` 的 Release。插件在此基础上实现自更新：
+
+1. 启动后 10 秒自动检查一次，之后每 6 小时检查一次；也可随时执行 **VsChat: Check for Updates** 手动检查。
+2. 发现新版本时弹出提示，确认后下载 VSIX 并自动安装，重载窗口即可生效。
+3. 发布新版本前，记得先修改 `package.json` 中的 `version`，推送后等待 workflow 生成 Release（几分钟），插件下次检查即可发现。
+
+可用 `vschat.autoUpdate` 设置（默认 `true`）关闭自动检查。注意：
+
+- GitHub API 匿名访问有每小时 60 次的限制，检查失败会自动跳过，不影响插件使用。
+- 第一次安装仍需要手动安装 VSIX，之后同一台机器上的更新即可自动完成。
+- 若自动安装失败，会提示打开 Release 页面手动下载。
 
 ## 📁 项目结构
 

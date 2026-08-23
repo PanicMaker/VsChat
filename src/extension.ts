@@ -3,6 +3,7 @@ import { ChatDB } from './chat-db';
 import { VsChatClient } from './vschat-client';
 import { ChatViewProvider } from './chat-view-provider';
 import { sendBarkPush } from './push';
+import { checkForUpdates, scheduleAutoUpdates } from './updater';
 
 let client: VsChatClient | undefined;
 let db: ChatDB | undefined;
@@ -71,6 +72,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     })
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vschat.checkUpdates', async () => {
+      await checkForUpdates(context, true);
+    })
+  );
+
+  scheduleAutoUpdates(context);
 
 }
 
