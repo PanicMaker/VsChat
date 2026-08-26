@@ -4,6 +4,7 @@ import { VsChatClient } from './vschat-client';
 import { ChatViewProvider } from './chat-view-provider';
 import { sendBarkPush } from './push';
 import { checkForUpdates, scheduleAutoUpdates } from './updater';
+import * as log from './logger';
 
 let client: VsChatClient | undefined;
 let db: ChatDB | undefined;
@@ -26,6 +27,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   } catch {
     // Ignore restore errors — user can log in manually
   }
+
+  // Global message subscription: receive logging + Bark push must work even
+  // when the VsChat side panel is closed (the panel's own onMessage
+  // subscription only exists while the webview is visible).
+  context.subscriptions.push(
+    client.onMessage(async (chatMsg) => {
+      log.info('onMessage fired:', JSON.stringify({
+        id: chatMsg.id,
+        type: chatMsg.type,
+        direction: chatMsg.direction,
+        contentLen: chatMsg.content.length,
+        imageDataUrlLen: (chatMsg as any).imageDataUrl?.length ?? 'none',
+      }));
+      if (chatMsg.direction === 'received') {
+        const preview = chatMsg.type === 1 ? chatMsg.content : '[Image]';
+        void sendBarkPush('WeChat', preview);
+      }
+    })
+  );
 
   // Register chat view provider (after restore so connected state is correct)
   const provider = new ChatViewProvider(context, client, db);

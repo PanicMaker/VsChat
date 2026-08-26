@@ -3,8 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { VsChatClient } from './vschat-client';
 import { ChatDB } from './chat-db';
-import * as log from './logger';
-import { sendBarkPush } from './push';
 import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -49,13 +47,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Subscribe to client events
     this.disposables.push(
       this.client.onMessage(async (chatMsg: ChatMessage & { imageDataUrl?: string }) => {
-        log.info('onMessage fired:', JSON.stringify({ id: chatMsg.id, type: chatMsg.type, direction: chatMsg.direction, contentLen: chatMsg.content.length, imageDataUrlLen: chatMsg.imageDataUrl?.length ?? 'none' }));
+        // Panel-only concerns: live UI updates and an editor notification.
+        // Receive logging + Bark push live in extension.ts (panel-independent).
         this.postMessage({ command: 'newMessage', message: chatMsg, imageDataUrl: chatMsg.imageDataUrl });
 
         if (chatMsg.direction === 'received') {
           const preview = chatMsg.type === 1 ? chatMsg.content : '[Image]';
           vscode.window.showInformationMessage(`WeChat: ${preview}`, { modal: false });
-          void sendBarkPush('WeChat', preview);
         }
       })
     );

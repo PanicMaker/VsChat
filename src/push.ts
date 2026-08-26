@@ -19,6 +19,7 @@ export async function sendBarkPush(title: string, message: string): Promise<bool
   const config = vscode.workspace.getConfiguration('vschat');
   const barkUrl = (config.get<string>('barkUrl') || '').trim();
   if (!barkUrl) {
+    log.info('Bark push skipped: vschat.barkUrl not configured');
     return false;
   }
 
