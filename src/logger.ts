@@ -10,7 +10,11 @@ function getChannel(): vscode.OutputChannel {
 }
 
 function timestamp(): string {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  // Local time, fixed-width, date + 24h clock (locale-independent)
+  const d = new Date();
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 export function info(...args: unknown[]): void {
