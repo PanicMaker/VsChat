@@ -280,6 +280,8 @@
       div.appendChild(textEl);
     } else if (msg.type === 2) {
       renderImageContent(div, msg);
+    } else if (msg.type === 3) {
+      renderVoiceContent(div, msg, false);
     }
     const timeEl = document.createElement('div');
     timeEl.className = 'timestamp';
@@ -308,6 +310,8 @@
       div.appendChild(textEl);
     } else if (msg.type === 2) {
       renderImageContent(div, msg);
+    } else if (msg.type === 3) {
+      renderVoiceContent(div, msg, true);
     }
   }
 
@@ -332,6 +336,8 @@
       div.appendChild(textEl);
     } else if (msg.type === 2) {
       renderImageContent(div, msg);
+    } else if (msg.type === 3) {
+      renderVoiceContent(div, msg, true);
     }
   }
 
@@ -362,6 +368,27 @@
       placeholder.textContent = currentMode === 'chat' ? '[Image sent]' : '<binary 0x...>';
       div.appendChild(placeholder);
     }
+  }
+
+  // 语音消息：优先显示微信返回的转写文本；旧记录 content 可能是整段 JSON，
+  // 尝试从中提取 voice_item.text。inline 用于 log/git 模式的行内渲染。
+  function extractVoiceText(content) {
+    if (!content || content === '[语音消息]') return '';
+    if (!content.startsWith('{')) return content;
+    try {
+      const parsed = JSON.parse(content);
+      return parsed.voice_item?.text || parsed.voice_item?.transcription || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function renderVoiceContent(container, msg, inline) {
+    const voiceText = extractVoiceText(msg.content);
+    const el = document.createElement(inline ? 'span' : 'div');
+    if (inline) el.className = 'msg-text';
+    el.textContent = voiceText ? `[语音] ${voiceText}` : '[语音消息]';
+    container.appendChild(el);
   }
 
   function scrollToBottom() {

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { VsChatClient } from './vschat-client';
 import { ChatDB } from './chat-db';
+import { previewForNotification } from './push';
 import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -52,7 +53,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.postMessage({ command: 'newMessage', message: chatMsg, imageDataUrl: chatMsg.imageDataUrl });
 
         if (chatMsg.direction === 'received') {
-          const preview = chatMsg.type === 1 ? chatMsg.content : '[Image]';
+          const preview = previewForNotification(chatMsg);
           vscode.window.showInformationMessage(`WeChat: ${preview}`, { modal: false });
         }
       })

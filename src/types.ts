@@ -14,7 +14,15 @@ export interface MsgItem {
   type: MsgTypeValue;
   text_item?: { text: string };
   image_item?: { aeskey: string; media: { aes_key: string; full_url: string; encrypt_query_param?: string }; thumb_size?: number; mid_size?: number; thumb_width?: number; thumb_height?: number };
-  voice_item?: { transcription: string };
+  voice_item?: {
+    media?: { encrypt_query_param?: string; aes_key?: string; full_url?: string };
+    encode_type?: number;
+    bits_per_sample?: number;
+    sample_rate?: number;
+    playtime?: number;
+    text?: string; // 微信返回的语音转写文本
+    transcription?: string; // 兼容旧字段
+  };
   file_item?: { file_name: string; file_size: number; cdn_url: string };
   video_item?: { aes_key: string; cdn_url: string };
   msg_id?: string;

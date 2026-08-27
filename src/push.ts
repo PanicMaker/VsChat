@@ -1,8 +1,20 @@
 import * as vscode from 'vscode';
 import { fetch } from 'undici';
 import * as log from './logger';
+import { ChatMessage } from './types';
 
 const MAX_CONTENT_LENGTH = 500;
+
+// 通知/提示条用的消息预览：文本直接显示，语音优先显示转写文本（兼容
+// content 是整段 JSON 的旧记录），其余沿用 [Image] 占位。
+export function previewForNotification(msg: ChatMessage): string {
+  if (msg.type === 1) return msg.content;
+  if (msg.type === 3) {
+    const content = msg.content || '';
+    return content.startsWith('{') ? '[语音消息]' : `[语音] ${content}`;
+  }
+  return '[Image]';
+}
 
 /**
  * Send a push notification to iPhone via Bark.

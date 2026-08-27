@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ChatDB } from './chat-db';
 import { VsChatClient } from './vschat-client';
 import { ChatViewProvider } from './chat-view-provider';
-import { sendBarkPush } from './push';
+import { sendBarkPush, previewForNotification } from './push';
 import { checkForUpdates, scheduleAutoUpdates } from './updater';
 import * as log from './logger';
 
@@ -41,7 +41,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         imageDataUrlLen: (chatMsg as any).imageDataUrl?.length ?? 'none',
       }));
       if (chatMsg.direction === 'received') {
-        const preview = chatMsg.type === 1 ? chatMsg.content : '[Image]';
+        const preview = previewForNotification(chatMsg);
         void sendBarkPush('WeChat', preview);
       }
     })

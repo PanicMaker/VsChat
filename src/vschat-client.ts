@@ -358,6 +358,9 @@ export class VsChatClient extends vscode.Disposable {
         let content = item.text_item?.text || '';
         if (item.type === 2 && item.image_item) {
           content = item.image_item.media?.full_url || JSON.stringify(item);
+        } else if (item.type === 3 && item.voice_item) {
+          // 语音消息：优先用微信返回的转写文本，缺失时给个占位而不是整段 JSON
+          content = item.voice_item.text || item.voice_item.transcription || '[语音消息]';
         } else if (!content) {
           content = JSON.stringify(item);
         }
