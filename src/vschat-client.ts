@@ -605,6 +605,15 @@ export class VsChatClient extends vscode.Disposable {
     if (!resp || (typeof resp.ret === 'number' && resp.ret !== 0)) {
       return { resp, warning, tokenUsed: contextToken };
     }
+    // Normal successful deliveries always echo message_id. ret:0 without it is
+    // a "silent drop" — the API accepted the request but did not deliver.
+    if (resp.message_id === undefined) {
+      const notDelivered =
+        `文本消息可能未送达：iLink 返回 ${JSON.stringify(resp)} 但无 message_id，通常表示接口接受后未真正投递。` +
+        `请让对方确认是否收到；若持续如此，可能是 bot 账号被平台风控，建议重新扫码登录并降低发送频率。`;
+      log.warn('send message: accepted without message_id — possibly not delivered');
+      warning = warning ? `${warning}\n${notDelivered}` : notDelivered;
+    }
 
     const chatMsg: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
@@ -751,6 +760,15 @@ export class VsChatClient extends vscode.Disposable {
     // iLink omits `ret` on success; only an explicit ret != 0 is an error.
     if (!resp || (typeof resp.ret === 'number' && resp.ret !== 0)) {
       return { resp, warning, tokenUsed: contextToken };
+    }
+    // Normal successful deliveries always echo message_id. ret:0 without it is
+    // a "silent drop" — the API accepted the request but did not deliver.
+    if (resp.message_id === undefined) {
+      const notDelivered =
+        `图片消息可能未送达：iLink 返回 ${JSON.stringify(resp)} 但无 message_id，通常表示接口接受后未真正投递。` +
+        `请让对方确认是否收到；若持续如此，可能是 bot 账号被平台风控，建议重新扫码登录并降低发送频率。`;
+      log.warn('send image: accepted without message_id — possibly not delivered');
+      warning = warning ? `${warning}\n${notDelivered}` : notDelivered;
     }
 
     const chatMsg: Omit<ChatMessage, 'id'> = {

@@ -120,4 +120,8 @@ export interface SendMessageResponse {
   ret?: number;
   errcode?: number;
   errmsg?: string;
+  // Normal successful deliveries echo back the assigned message_id. A
+  // response with ret:0 but no message_id means iLink accepted the request
+  // without actually delivering it (observed 2026-08-31 platform behavior).
+  message_id?: number;
 }
