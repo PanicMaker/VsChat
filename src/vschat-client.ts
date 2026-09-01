@@ -182,6 +182,11 @@ export class VsChatClient extends vscode.Disposable {
   }
 
   async login(): Promise<void> {
+    // Re-login: stop any active polling so the old session can't keep sending
+    // with a stale token while the QR flow runs (previously this produced a
+    // misleading "logged in but still on the old session" state).
+    this.stopPolling();
+    this._connected = false;
     this.emitStatus('Generating QR code...');
 
     while (true) {
@@ -202,9 +207,17 @@ export class VsChatClient extends vscode.Disposable {
     }
 
     this._connected = true;
+    // Clear per-session metadata — the new session's peer ids / context_token
+    // only become known after the first inbound message. Chat history (the
+    // messages table) and the polling cursor are intentionally preserved.
+    await this.db.setMetadata('from_user_id', '');
+    await this.db.setMetadata('to_user_id', '');
+    await this.db.setMetadata('context_token', '');
+    await this.db.setMetadata(CONTEXT_TOKEN_STALE_FLAG, '');
+    await this.db.setMetadata('last_inbound_ts', '');
     await this.context.secrets.store('vschat_token', this.botToken);
     await this.saveCredentialsToFile();
-    this.emitStatus('Login successful');
+    this.emitStatus('Login successful — 请先让对方发一条消息刷新会话');
     this._onLoginSuccess.fire();
   }
 
