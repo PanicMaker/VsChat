@@ -1,8 +1,8 @@
 {
   "name": "vschat",
   "displayName": "VsChat",
-  "description": "Chat with WeChat contacts via iLink protocol in VSCode",
-  "version": "0.8.2",
+  "description": "Chat through WeChat iLink or QQ Bot directly in VSCode",
+  "version": "0.9.0",
   "publisher": "PanicMaker",
   "repository": {
     "type": "git",
@@ -43,6 +43,10 @@
         "title": "VsChat: Login"
       },
       {
+        "command": "vschat.configureQQ",
+        "title": "VsChat: Configure QQ Bot"
+      },
+      {
         "command": "vschat.clearHistory",
         "title": "VsChat: Clear Chat History"
       },
@@ -57,11 +61,28 @@
       {
         "command": "vschat.checkUpdates",
         "title": "VsChat: Check for Updates"
+      },
+      {
+        "command": "vschat.showLogs",
+        "title": "VsChat: Show Diagnostic Logs"
       }
     ],
     "configuration": {
       "title": "VsChat",
       "properties": {
+        "vschat.channel": {
+          "type": "string",
+          "enum": [
+            "wechat",
+            "qq"
+          ],
+          "enumDescriptions": [
+            "Use the WeChat iLink transport.",
+            "Use the official QQ Bot API v2 transport."
+          ],
+          "default": "wechat",
+          "description": "Chat transport. Reload VS Code after changing this setting."
+        },
         "vschat.proxyUrl": {
           "type": "string",
           "default": "",
@@ -72,10 +93,26 @@
           "default": "",
           "description": "WeChat contact ID to chat with (e.g., o9cq800kum_xxx@im.wechat). Leave empty to auto-detect."
         },
+        "vschat.qqUserOpenId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional QQ user OpenID for proactive messages. Leave empty to use the most recent user who messaged the bot."
+        },
         "vschat.barkUrl": {
           "type": "string",
           "default": "",
           "description": "Bark push URL for iPhone notifications. Use a base URL like https://api.day.app/YOUR_KEY/ or a template containing {title} and {message}. Leave empty to disable."
+        },
+        "vschat.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "debug",
+          "description": "Diagnostic log verbosity. Debug includes request timing and connection details but excludes credentials and message content."
         },
         "vschat.autoUpdate": {
           "type": "boolean",

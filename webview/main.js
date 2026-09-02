@@ -164,7 +164,8 @@
   function localQuoteText(messageId) {
     if (!messageId) return '';
     const found = allMessages.find(
-      (m) => m.message_id && normalizeMsgId(m.message_id) === normalizeMsgId(messageId)
+      (m) => (m.message_id && normalizeMsgId(m.message_id) === normalizeMsgId(messageId))
+        || (m.reference_id && m.reference_id === messageId)
     );
     return found && found.type === 1 ? found.content : '';
   }
@@ -173,6 +174,8 @@
     if (!msg || !msg.message_id) return;
     quoteTarget = {
       messageId: msg.message_id,
+      referenceId: msg.reference_id,
+      direction: msg.direction,
       type: msg.type,
       text: msg.type === 1 ? msg.content : '',
       timestamp: msg.timestamp,
@@ -199,7 +202,8 @@
     let targetEl = messagesEl.querySelector(`[data-msgid="${CSS.escape(String(messageId))}"]`);
     if (!targetEl) {
       const found = allMessages.find(
-        (m) => m.message_id && normalizeMsgId(m.message_id) === normalizeMsgId(messageId)
+        (m) => (m.message_id && normalizeMsgId(m.message_id) === normalizeMsgId(messageId))
+          || (m.reference_id && m.reference_id === messageId)
       );
       if (found) targetEl = messagesEl.querySelector(`[data-id="${found.id}"]`);
     }
@@ -282,6 +286,8 @@
       renderImageContent(div, msg);
     } else if (msg.type === 3) {
       renderVoiceContent(div, msg, false);
+    } else {
+      renderOtherContent(div, msg, false);
     }
     const timeEl = document.createElement('div');
     timeEl.className = 'timestamp';
@@ -312,6 +318,8 @@
       renderImageContent(div, msg);
     } else if (msg.type === 3) {
       renderVoiceContent(div, msg, true);
+    } else {
+      renderOtherContent(div, msg, true);
     }
   }
 
@@ -338,6 +346,8 @@
       renderImageContent(div, msg);
     } else if (msg.type === 3) {
       renderVoiceContent(div, msg, true);
+    } else {
+      renderOtherContent(div, msg, true);
     }
   }
 
@@ -391,6 +401,22 @@
     container.appendChild(el);
   }
 
+  function renderOtherContent(container, msg, inline) {
+    const isUrl = msg.content && msg.content.startsWith('http');
+    const typeLabel = msg.type === 4 ? '文件' : msg.type === 5 ? '视频' : '消息';
+    const el = document.createElement(inline ? 'span' : 'div');
+    if (inline) el.className = 'msg-text';
+    el.textContent = isUrl ? `[${typeLabel}]` : (msg.content || `[${typeLabel}]`);
+    if (isUrl) {
+      el.classList.add('image-container');
+      el.title = '打开附件';
+      el.addEventListener('click', () => {
+        vscode.postMessage({ command: 'openExternal', url: msg.content });
+      });
+    }
+    container.appendChild(el);
+  }
+
   function scrollToBottom() {
     chatContainer.scrollTop = chatContainer.scrollHeight;
   }
@@ -439,6 +465,8 @@
     if (text) {
       const replyTo = quoteTarget ? {
         messageId: quoteTarget.messageId,
+        referenceId: quoteTarget.referenceId,
+        direction: quoteTarget.direction,
         type: quoteTarget.type,
         text: quoteTarget.text,
         timestamp: quoteTarget.timestamp,

@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { VsChatClient } from './vschat-client';
+import { ChatClient } from './chat-client';
 import { ChatDB } from './chat-db';
 import { previewForNotification } from './push';
 import { WebViewOutbound, WebViewInbound, ChatMessage } from './types';
+import * as log from './logger';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'vschat.chatView';
@@ -14,7 +15,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private context: vscode.ExtensionContext,
-    private client: VsChatClient,
+    private client: ChatClient,
     private db: ChatDB
   ) {}
 
@@ -24,6 +25,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ): void {
     this.view = webviewView;
+    log.info('[UI] chat view resolved', { channel: this.client.channelName, connected: this.client.connected });
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -54,7 +56,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         if (chatMsg.direction === 'received') {
           const preview = previewForNotification(chatMsg);
-          vscode.window.showInformationMessage(`WeChat: ${preview}`, { modal: false });
+          vscode.window.showInformationMessage(`${this.client.channelName}: ${preview}`, { modal: false });
         }
       })
     );
@@ -76,8 +78,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         try {
           const messages = await this.db.getRecentMessages(100);
           this.postMessage({ command: 'loadHistory', messages });
-        } catch {
-          // Ignore DB errors on login success — history will load on next panel open
+        } catch (err) {
+          log.warn('[UI] history load after login failed', { channel: this.client.channelName }, log.formatError(err));
         }
       })
     );
@@ -90,6 +92,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleWebViewMessage(msg: WebViewOutbound): Promise<void> {
+    const operationId = log.nextId('ui');
+    log.debug('[UI] command received', {
+      operationId,
+      command: msg.command,
+      textLength: msg.text?.length || 0,
+      imageDataLength: msg.imageData?.length || 0,
+      hasReply: Boolean(msg.replyTo),
+    });
     try {
       if (msg.command === 'sendMessage' && msg.text) {
         const warning = await this.client.sendText(msg.text, msg.replyTo);
@@ -97,7 +107,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.command === 'sendImage' && msg.imageData) {
         const tempDir = path.join(this.context.globalStorageUri.fsPath, 'temp');
         fs.mkdirSync(tempDir, { recursive: true });
-        const tempPath = path.join(tempDir, `img_${Date.now()}.png`);
+        const requestedExtension = path.extname(msg.fileName || '').toLowerCase();
+        const safeExtension = /^\.(png|jpe?g|gif|webp|bmp)$/.test(requestedExtension)
+          ? requestedExtension
+          : '.png';
+        const tempPath = path.join(tempDir, `img_${Date.now()}${safeExtension}`);
 
         // Remove data URL prefix and validate size (max 10MB)
         const base64Data = msg.imageData.replace(/^data:image\/\w+;base64,/, '');
@@ -125,35 +139,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Could implement pagination here
       }
     } catch (err: any) {
+      log.error('[UI] command failed', { operationId, command: msg.command, channel: this.client.channelName }, log.formatError(err));
       this.postMessage({ command: 'error', error: err.message });
     }
   }
 
   async loadHistory(): Promise<void> {
+    const startedAt = Date.now();
     const messages = await this.db.getRecentMessages(100);
     // Attach persisted image data for image messages
     const messagesWithImages = await Promise.all(
       messages.map(async (msg) => {
         if (msg.type === 2) {
-          const url = await this.client.getDecryptedImageUrl(msg.id);
+          const url = await this.client.getDecryptedImageUrl(msg.id)
+            || (msg.content?.startsWith('http') ? msg.content : undefined);
           return url ? { ...msg, imageDataUrl: url } : msg;
         }
         return msg;
       })
     );
     this.postMessage({ command: 'loadHistory', messages: messagesWithImages });
+    log.info('[UI] history loaded', {
+      channel: this.client.channelName,
+      messageCount: messagesWithImages.length,
+      durationMs: Date.now() - startedAt,
+    });
   }
 
   async clearHistory(): Promise<void> {
+    log.info('[UI] clearing history', { channel: this.client.channelName });
     await this.db.clearAll();
-    // Also clear persisted images
+    // Clear only the active channel's media; the other channel's history and
+    // files intentionally survive transport switching.
     try {
-      const imgDir = path.join(this.context.globalStorageUri.fsPath, 'images');
+      const directoryName = this.client.channelName === 'QQ' ? 'qq-images' : 'images';
+      const imgDir = path.join(this.context.globalStorageUri.fsPath, directoryName);
       await fs.promises.rm(imgDir, { recursive: true, force: true });
     } catch {
       // Directory doesn't exist — that's fine
     }
     this.postMessage({ command: 'clearHistory' });
+    log.info('[UI] history cleared', { channel: this.client.channelName });
   }
 
   private postMessage(msg: WebViewInbound): void {

@@ -7,16 +7,18 @@ import QRCode from 'qrcode';
 import { ChatDB } from './chat-db';
 import * as log from './logger';
 import {
-  ILinkMessage,
   ChatMessage,
   MsgType,
   MsgTypeValue,
+  ReplyTo,
+} from './types';
+import {
+  ILinkMessage,
   QRCodeResponse,
   QRCodeStatusResponse,
   GetUpdatesResponse,
   SendMessageResponse,
-  ReplyTo,
-} from './types';
+} from './wx-types';
 
 function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
   const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
@@ -69,7 +71,8 @@ interface SendAttemptResult {
   tokenUsed?: string;
 }
 
-export class VsChatClient extends vscode.Disposable {
+export class WxClient extends vscode.Disposable {
+  readonly channelName = 'WeChat';
   private botToken: string = '';
   private botBaseUrl: string = BASE_URL;
   private polling: boolean = false;
@@ -78,6 +81,7 @@ export class VsChatClient extends vscode.Disposable {
   private maxReconnectDelay: number = 30000;
   private _connected: boolean = false;
   private outboundMsgCounter: number = 0;
+  private loggingIn: boolean = false;
 
   private _onMessage = new vscode.EventEmitter<ChatMessage>();
   readonly onMessage = this._onMessage.event;
@@ -115,9 +119,9 @@ export class VsChatClient extends vscode.Disposable {
     // Proxy changed — log and recreate
     if (proxy) {
       const source = proxyUrl ? 'settings' : 'env';
-      log.info(`Proxy configured (${source}): ${proxy}`);
+      log.info('[WX Network] proxy configured', { source, endpoint: log.describeUrl(proxy) });
     } else if (this._cachedProxyUrl) {
-      log.info('Proxy removed, using direct connection');
+      log.info('[WX Network] proxy removed; using direct connection');
     }
 
     this._cachedProxyUrl = proxy;
@@ -129,7 +133,17 @@ export class VsChatClient extends vscode.Disposable {
     const url = `${this.botBaseUrl}${urlPath}`;
     const agent = this.getProxyAgent();
     const method = (init?.method || 'GET').toUpperCase();
-    log.info(`${method} ${urlPath} ${agent ? '(via proxy)' : '(direct)'}`);
+    const requestId = log.nextId('wx-http');
+    const startedAt = Date.now();
+    const safePath = this.safeRequestPath(urlPath);
+    log.debug('[WX HTTP] request', {
+      requestId,
+      method,
+      path: safePath,
+      host: log.describeUrl(this.botBaseUrl),
+      proxy: Boolean(agent),
+      hasSessionToken: Boolean(this.botToken),
+    });
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -145,9 +159,25 @@ export class VsChatClient extends vscode.Disposable {
       ...init,
       headers,
       dispatcher: agent,
-    } as RequestInit);
+    } as RequestInit).catch((err) => {
+      log.error('[WX HTTP] network failure', {
+        requestId,
+        method,
+        path: safePath,
+        durationMs: Date.now() - startedAt,
+      }, log.formatError(err));
+      throw err;
+    });
 
     if (!response.ok) {
+      log.error('[WX HTTP] request rejected', {
+        requestId,
+        method,
+        path: safePath,
+        status: response.status,
+        statusText: response.statusText,
+        durationMs: Date.now() - startedAt,
+      });
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
@@ -158,6 +188,15 @@ export class VsChatClient extends vscode.Disposable {
     } catch {
       json = undefined;
     }
+    log.debug('[WX HTTP] response', {
+      requestId,
+      method,
+      path: safePath,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      responseBytes: Buffer.byteLength(text),
+      jsonParsed: json !== undefined,
+    });
     return { json, text };
   }
 
@@ -182,43 +221,62 @@ export class VsChatClient extends vscode.Disposable {
   }
 
   async login(): Promise<void> {
+    // Guard against overlapping login flows: each invocation starts its own QR
+    // polling loop, so repeated Login commands used to pile up multiple
+    // parallel loops polling different QR codes (and none of them confirming).
+    if (this.loggingIn) {
+      log.warn('[WX Auth] overlapping login request ignored');
+      this.emitStatus('正在登录中，请等待当前二维码确认或过期…');
+      return;
+    }
+    this.loggingIn = true;
+    log.info('[WX Auth] QR login started');
+
     // Re-login: stop any active polling so the old session can't keep sending
     // with a stale token while the QR flow runs (previously this produced a
     // misleading "logged in but still on the old session" state).
-    this.stopPolling();
-    this._connected = false;
-    this.emitStatus('Generating QR code...');
+    try {
+      this.stopPolling();
+      this._connected = false;
+      this.emitStatus('Generating QR code...');
 
-    while (true) {
-      const qrRes = await this.request<QRCodeResponse>('/ilink/bot/get_bot_qrcode?bot_type=3');
+      while (true) {
+        log.debug('[WX Auth] requesting QR code');
+        const qrRes = await this.request<QRCodeResponse>('/ilink/bot/get_bot_qrcode?bot_type=3');
 
-      if (qrRes.qrcode_img_content) {
-        const base64 = await this.fetchQrAsBase64(qrRes.qrcode_img_content);
-        if (base64) {
-          this.emitQrCode(base64);
+        if (qrRes.qrcode_img_content) {
+          const base64 = await this.fetchQrAsBase64(qrRes.qrcode_img_content);
+          if (base64) {
+            this.emitQrCode(base64);
+          }
         }
+        this.emitStatus('Please scan QR code with WeChat');
+
+        const confirmed = await this.pollQrStatus(qrRes.qrcode);
+        if (confirmed) break;
+
+        log.info('[WX Auth] QR code expired; requesting replacement');
+        this.emitStatus('QR code expired, generating new one...');
       }
-      this.emitStatus('Please scan QR code with WeChat');
 
-      const confirmed = await this.pollQrStatus(qrRes.qrcode);
-      if (confirmed) break;
-
-      this.emitStatus('QR code expired, generating new one...');
+      this._connected = true;
+      // Clear per-session metadata — the new session's peer ids / context_token
+      // only become known after the first inbound message. Chat history (the
+      // messages table) and the polling cursor are intentionally preserved.
+      await this.db.setMetadata('from_user_id', '');
+      await this.db.setMetadata('to_user_id', '');
+      await this.db.setMetadata('context_token', '');
+      await this.db.setMetadata(CONTEXT_TOKEN_STALE_FLAG, '');
+      await this.db.setMetadata('last_inbound_ts', '');
+      await this.context.secrets.store('vschat_token', this.botToken);
+      await this.saveCredentialsToFile();
+      log.info('[WX Auth] login completed', { host: log.describeUrl(this.botBaseUrl) });
+      this.emitStatus('Login successful — 请先让对方发一条消息刷新会话');
+      this._onLoginSuccess.fire();
+    } finally {
+      this.loggingIn = false;
+      log.debug('[WX Auth] QR login flow finished', { connected: this._connected });
     }
-
-    this._connected = true;
-    // Clear per-session metadata — the new session's peer ids / context_token
-    // only become known after the first inbound message. Chat history (the
-    // messages table) and the polling cursor are intentionally preserved.
-    await this.db.setMetadata('from_user_id', '');
-    await this.db.setMetadata('to_user_id', '');
-    await this.db.setMetadata('context_token', '');
-    await this.db.setMetadata(CONTEXT_TOKEN_STALE_FLAG, '');
-    await this.db.setMetadata('last_inbound_ts', '');
-    await this.context.secrets.store('vschat_token', this.botToken);
-    await this.saveCredentialsToFile();
-    this.emitStatus('Login successful — 请先让对方发一条消息刷新会话');
-    this._onLoginSuccess.fire();
   }
 
   private async saveCredentialsToFile(): Promise<void> {
@@ -230,8 +288,9 @@ export class VsChatClient extends vscode.Disposable {
         savedAt: new Date().toISOString(),
       };
       await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2));
+      log.debug('[WX Auth] fallback credential file saved', { directory: this.context.globalStorageUri.fsPath });
     } catch (err: any) {
-      log.error('Failed to save credentials file:', err.message);
+      log.error('[WX Auth] failed to save fallback credential file', log.formatError(err));
     }
   }
 
@@ -243,8 +302,8 @@ export class VsChatClient extends vscode.Disposable {
       if (data.token) {
         return { token: data.token, baseUrl: data.baseUrl || BASE_URL };
       }
-    } catch {
-      // File doesn't exist or is invalid — that's fine
+    } catch (err) {
+      log.debug('[WX Auth] fallback credential file unavailable', log.formatError(err));
     }
     return null;
   }
@@ -259,18 +318,33 @@ export class VsChatClient extends vscode.Disposable {
       });
       return base64;
     } catch (err: any) {
-      log.error('QR generation error:', err.message);
+      log.error('[WX Auth] QR generation failed', log.formatError(err));
       return null;
     }
   }
 
   private async pollQrStatus(qrcode: string): Promise<boolean> {
+    let lastStatus = '';
     for (let i = 0; i < 60; i++) {
       await this.sleep(2000);
       try {
         const status = await this.request<QRCodeStatusResponse>(
           `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`
         );
+        // Log state transitions (not every poll) so the login flow is debuggable
+        if (status.status !== lastStatus) {
+          lastStatus = status.status;
+          log.info('[WX Auth] QR status changed', {
+            status: status.status,
+            tokenPresent: Boolean(status.bot_token),
+            baseUrlPresent: Boolean(status.baseurl),
+          });
+          if (status.status === 'scaned') {
+            this.emitStatus('已扫码 — 请在手机上确认登录');
+          } else if (status.status === 'need_verifycode') {
+            this.emitStatus('需要验证码 — 请在手机上完成验证');
+          }
+        }
         if (status.status === 'confirmed' || status.status === 'binded_redirect') {
           this.botToken = status.bot_token || this.botToken;
           if (status.baseurl) {
@@ -282,6 +356,7 @@ export class VsChatClient extends vscode.Disposable {
           return false;
         }
       } catch (err: any) {
+        log.warn('[WX Auth] QR status poll failed', { attempt: i + 1 }, log.formatError(err));
         this.emitStatus(`QR polling error: ${err.message}`);
       }
     }
@@ -295,6 +370,7 @@ export class VsChatClient extends vscode.Disposable {
       this.botToken = secretToken;
       this._connected = true;
       this.emitStatus('Restored previous session');
+      log.info('[WX Auth] session restored from SecretStorage');
       return true;
     }
 
@@ -305,19 +381,27 @@ export class VsChatClient extends vscode.Disposable {
       this.botBaseUrl = fileCreds.baseUrl;
       this._connected = true;
       this.emitStatus('Restored previous session (file)');
+      log.info('[WX Auth] session restored from fallback credential file', {
+        host: log.describeUrl(this.botBaseUrl),
+      });
       return true;
     }
 
+    log.info('[WX Auth] no saved session found');
     return false;
   }
 
   async startPolling(): Promise<void> {
-    if (this.polling) return;
+    if (this.polling) {
+      log.debug('[WX Poll] start ignored; polling already active');
+      return;
+    }
     this.polling = true;
     this.pollingAbort = new AbortController();
     this.reconnectDelay = 1000;
-    log.info('Polling started');
+    log.info('[WX Poll] polling started');
     this.pollLoop().catch((err) => {
+      log.error('[WX Poll] polling loop stopped unexpectedly', log.formatError(err));
       this.emitStatus(`Polling error: ${err.message}`);
     });
   }
@@ -326,7 +410,7 @@ export class VsChatClient extends vscode.Disposable {
     while (this.polling) {
       try {
         const cursor = await this.db.getMetadata('last_cursor') || '';
-        log.info('Polling getupdates, cursor length:', cursor.length);
+        log.debug('[WX Poll] requesting updates', { cursorLength: cursor.length });
         const raw = await this.requestRaw('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
@@ -336,7 +420,15 @@ export class VsChatClient extends vscode.Disposable {
           signal: this.pollingAbort?.signal,
         });
         const res = raw.json as GetUpdatesResponse;
-        log.info('getupdates response:', JSON.stringify({ msgCount: res.msgs?.length ?? 'null', cursorLen: res.get_updates_buf?.length ?? 0 }));
+        const messageCount = res.msgs?.length ?? 0;
+        log.debug('[WX Poll] updates received', {
+          messageCount,
+          cursorLength: res.get_updates_buf?.length ?? 0,
+          ret: res.ret,
+        });
+        if (messageCount > 0) {
+          log.info('[WX Poll] inbound batch received', { messageCount });
+        }
 
         if (res.msgs && res.msgs.length > 0) {
           // Re-attach exact message_id strings (in order) before processing
@@ -353,8 +445,13 @@ export class VsChatClient extends vscode.Disposable {
 
         this.reconnectDelay = 1000;
       } catch (err: any) {
-        log.info('Poll error:', err.name, err.message);
-        if (err.name === 'AbortError') break;
+        if (err.name === 'AbortError') {
+          log.debug('[WX Poll] request aborted during shutdown');
+          break;
+        }
+        log.warn('[WX Poll] request failed; retry scheduled', {
+          delayMs: this.reconnectDelay,
+        }, log.formatError(err));
         this.emitStatus(`Connection lost, retrying in ${this.reconnectDelay / 1000}s...`);
         await this.sleep(this.reconnectDelay);
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
@@ -364,9 +461,15 @@ export class VsChatClient extends vscode.Disposable {
 
   private async processMessages(msgs: ILinkMessage[]): Promise<void> {
     for (const msg of msgs) {
-      // Log the full envelope so we can inspect peer-side id fields (msg.message_id,
-      // item.msg_id, item.extra) when debugging quote-reply routing
-      log.info('processMessage msg:', JSON.stringify(msg));
+      log.info('[WX Receive] message envelope', {
+        messageId: msg._exactMessageId || msg.message_id,
+        fromUserId: msg.from_user_id,
+        toUserId: msg.to_user_id,
+        messageType: msg.message_type,
+        messageState: msg.message_state,
+        itemCount: msg.item_list.length,
+        hasContextToken: Boolean(msg.context_token),
+      });
       for (const item of msg.item_list) {
         let content = item.text_item?.text || '';
         if (item.type === 2 && item.image_item) {
@@ -390,6 +493,16 @@ export class VsChatClient extends vscode.Disposable {
           msg.message_id?.toString() ||
           '';
         const ownMessageId: string = rawOwnMessageId.replace(/^v1:/, '');
+        log.debug('[WX Receive] processing item', {
+          messageId: ownMessageId,
+          itemType: item.type,
+          contentLength: item.text_item?.text?.length || item.voice_item?.text?.length || 0,
+          hasImage: Boolean(item.image_item),
+          hasVoice: Boolean(item.voice_item),
+          hasFile: Boolean(item.file_item),
+          hasVideo: Boolean(item.video_item),
+          hasReference: Boolean(itemAny.extra?.ref_msg ?? itemAny.ref_msg),
+        });
 
         // Quoted message: iLink nests it under item.extra.ref_msg (some clients flatten to item.ref_msg)
         const refAny = itemAny.extra?.ref_msg ?? itemAny.ref_msg;
@@ -457,12 +570,20 @@ export class VsChatClient extends vscode.Disposable {
         // For images, fetch and decrypt before firing so webview has the data
         let imageDataUrl: string | undefined;
         if (item.type === 2 && item.image_item) {
-          log.info('Fetching image:', item.image_item.media?.full_url?.substring(0, 50));
+          log.info('[WX Media] downloading inbound image', {
+            messageId: ownMessageId,
+            host: log.describeUrl(item.image_item.media?.full_url),
+          });
           imageDataUrl = await this.fetchImageAsDataUrl(item.image_item.media.full_url, item.image_item.media.aes_key);
-          log.info('Image fetched:', imageDataUrl ? imageDataUrl.length + ' bytes data url' : 'failed');
+          log.info('[WX Media] inbound image processed', {
+            messageId: ownMessageId,
+            success: Boolean(imageDataUrl),
+            dataUrlBytes: imageDataUrl ? Buffer.byteLength(imageDataUrl) : 0,
+          });
         }
 
         const id = await this.db.insertMessage(chatMsg);
+        log.debug('[WX Receive] message persisted', { dbId: id, messageId: ownMessageId, type: item.type });
 
         if (imageDataUrl) {
           await this.persistImage(id, imageDataUrl);
@@ -474,27 +595,44 @@ export class VsChatClient extends vscode.Disposable {
   }
 
   private async fetchImageAsDataUrl(cdnUrl: string, aesKeyBase64: string): Promise<string | undefined> {
+    const operationId = log.nextId('wx-media');
+    const startedAt = Date.now();
     try {
-      log.info('fetchImage: cdnUrl=', cdnUrl.substring(0, 80));
-      log.info('fetchImage: aesKeyBase64=', aesKeyBase64.substring(0, 40));
       // media.aes_key is base64 of a 32-char hex string
       // Decode: base64 → hex string → 16 raw bytes (matching official openclaw-weixin)
       const hexStr = Buffer.from(aesKeyBase64, 'base64').toString('ascii');
-      log.info('fetchImage: hexStr=', hexStr, 'length=', hexStr.length);
       const key = Buffer.from(hexStr, 'hex');
-      log.info('fetchImage: key length=', key.length);
       const agent = this.getProxyAgent();
-      log.info('fetchImage: agent=', agent ? 'proxy set' : 'no proxy');
+      log.debug('[WX Media] encrypted download request', {
+        operationId,
+        host: log.describeUrl(cdnUrl),
+        keyBytes: key.length,
+        proxy: Boolean(agent),
+      });
       const resp = await fetch(cdnUrl, { dispatcher: agent } as RequestInit);
-      log.info('fetchImage: resp.status=', resp.status, 'resp.ok=', resp.ok);
-      if (!resp.ok) return undefined;
+      if (!resp.ok) {
+        log.error('[WX Media] encrypted download rejected', {
+          operationId,
+          status: resp.status,
+          durationMs: Date.now() - startedAt,
+        });
+        return undefined;
+      }
       const encrypted = Buffer.from(await resp.arrayBuffer());
-      log.info('fetchImage: encrypted length=', encrypted.length);
       const decrypted = decryptAesEcb(encrypted, key);
-      log.info('fetchImage: decrypted length=', decrypted.length);
+      log.info('[WX Media] image decrypted', {
+        operationId,
+        status: resp.status,
+        encryptedBytes: encrypted.length,
+        decryptedBytes: decrypted.length,
+        durationMs: Date.now() - startedAt,
+      });
       return `data:image/png;base64,${decrypted.toString('base64')}`;
     } catch (err: any) {
-      log.error('fetchImage error:', err.message, err.stack);
+      log.error('[WX Media] image download/decrypt failed', {
+        operationId,
+        durationMs: Date.now() - startedAt,
+      }, log.formatError(err));
       return undefined;
     }
   }
@@ -509,8 +647,9 @@ export class VsChatClient extends vscode.Disposable {
       await fs.promises.writeFile(imgPath, Buffer.from(base64, 'base64'));
       // Also store the data URL in a JSON sidecar for easy retrieval
       await fs.promises.writeFile(`${imgPath}.url.json`, JSON.stringify({ dataUrl }));
+      log.debug('[WX Media] image persisted', { dbId: messageId, bytes: Buffer.byteLength(dataUrl) });
     } catch (err: any) {
-      log.error('Failed to persist image:', err.message);
+      log.error('[WX Media] failed to persist image', { dbId: messageId }, log.formatError(err));
     }
   }
 
@@ -526,12 +665,18 @@ export class VsChatClient extends vscode.Disposable {
   }
 
   stopPolling(): void {
+    log.info('[WX Poll] stopping polling', { active: this.polling, connected: this._connected });
     this.polling = false;
     this.pollingAbort?.abort();
   }
 
   async sendText(text: string, replyTo?: ReplyTo): Promise<string | undefined> {
     if (!this._connected) throw new Error('Not connected');
+    log.info('[WX Send] text requested', {
+      contentLength: text.length,
+      hasReference: Boolean(replyTo?.messageId),
+      referenceId: replyTo?.messageId,
+    });
     const result = await this.sendWithRecovery(
       (opts) => this.sendTextOnce(text, replyTo, opts.tokenless),
       'message'
@@ -565,7 +710,7 @@ export class VsChatClient extends vscode.Disposable {
     let warning: string | undefined;
     if (lastInboundTs > 0 && staleSecs > 86400) {
       warning = `会话可能已过期（距上次收到消息约 ${Math.floor(staleSecs / 3600)} 小时），对方可能收不到。发送已继续，建议先让对方发一条消息刷新会话。`;
-      log.info('sendText stale-session warning:', warning);
+      log.warn('[WX Send] session may be stale', { messageType: 'text', inboundAgeSeconds: staleSecs });
     }
 
     const msgId = this.nextMessageId();
@@ -605,12 +750,28 @@ export class VsChatClient extends vscode.Disposable {
       base_info: { channel_version: '2.4.3' },
     };
 
-    log.info('sendText payload:', JSON.stringify(payload));
+    const startedAt = Date.now();
+    log.debug('[WX Send] sending text attempt', {
+      messageId: msgId,
+      toUserId: fromId,
+      fromUserId: toId,
+      contentLength: text.length,
+      tokenless,
+      hasContextToken: Boolean(contextToken),
+      hasReference: Boolean(replyTo?.messageId),
+    });
     const resp = await this.request<SendMessageResponse>('/ilink/bot/sendmessage', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    log.info('sendText response:', JSON.stringify(resp));
+    log.info('[WX Send] text response', {
+      messageId: msgId,
+      responseMessageId: resp?.message_id,
+      ret: resp?.ret,
+      errcode: resp?.errcode,
+      errmsg: resp?.errmsg,
+      durationMs: Date.now() - startedAt,
+    });
     // iLink omits `ret` on success (observed: {"message_id":...}); only an
     // explicit ret != 0 is a business error. HTTP 200 with an unparseable body
     // (resp undefined) is treated as failure — never insert a message we can't
@@ -624,7 +785,11 @@ export class VsChatClient extends vscode.Disposable {
       const notDelivered =
         `文本消息可能未送达：iLink 返回 ${JSON.stringify(resp)} 但无 message_id，通常表示接口接受后未真正投递。` +
         `请让对方确认是否收到；若持续如此，可能是 bot 账号被平台风控，建议重新扫码登录并降低发送频率。`;
-      log.warn('send message: accepted without message_id — possibly not delivered');
+      log.warn('[WX Send] text accepted without message_id; delivery is unconfirmed', {
+        messageId: msgId,
+        ret: resp.ret,
+        errcode: resp.errcode,
+      });
       warning = warning ? `${warning}\n${notDelivered}` : notDelivered;
     }
 
@@ -648,12 +813,18 @@ export class VsChatClient extends vscode.Disposable {
     };
 
     const id = await this.db.insertMessage(chatMsg);
+    log.debug('[WX Send] text persisted', { dbId: id, messageId: msgId });
     this._onMessage.fire({ ...chatMsg, id });
     return { resp, warning, tokenUsed: contextToken };
   }
 
   async sendImage(imagePath: string): Promise<string | undefined> {
     if (!this._connected) throw new Error('Not connected');
+    const stat = await fs.promises.stat(imagePath);
+    log.info('[WX Send] image requested', {
+      bytes: stat.size,
+      extension: path.extname(imagePath).toLowerCase(),
+    });
     const result = await this.sendWithRecovery(
       (opts) => this.sendImageOnce(imagePath, opts.tokenless),
       'image'
@@ -675,7 +846,7 @@ export class VsChatClient extends vscode.Disposable {
     let warning: string | undefined;
     if (lastInboundTs > 0 && staleSecs > 86400) {
       warning = `会话可能已过期（距上次收到消息约 ${Math.floor(staleSecs / 3600)} 小时），对方可能收不到。发送已继续，建议先让对方发一条消息刷新会话。`;
-      log.info('sendImage stale-session warning:', warning);
+      log.warn('[WX Send] session may be stale', { messageType: 'image', inboundAgeSeconds: staleSecs });
     }
 
     // Generate random AES key and file metadata
@@ -684,6 +855,15 @@ export class VsChatClient extends vscode.Disposable {
     const fileMd5 = crypto.createHash('md5').update(fileData).digest('hex');
     const filekey = crypto.randomBytes(16).toString('hex');
     const filesize = aesEcbPaddedSize(fileData.length);
+    const operationId = log.nextId('wx-upload');
+    const uploadStartedAt = Date.now();
+    log.info('[WX Media] requesting upload URL', {
+      operationId,
+      rawBytes: fileData.length,
+      encryptedBytes: filesize,
+      toUserId: fromId,
+      tokenless,
+    });
 
     // Get upload URL with proper parameters (matching official openclaw-weixin)
     const uploadUrlRes = await this.request<{
@@ -715,7 +895,12 @@ export class VsChatClient extends vscode.Disposable {
     // Encrypt with AES-128-ECB before uploading (matching official openclaw-weixin)
     const ciphertext = this.aesEncrypt(fileData, aesKey);
     const agent = this.getProxyAgent();
-    log.info(`CDN upload ${ciphertext.length} bytes ${agent ? '(via proxy)' : '(direct)'}`);
+    log.info('[WX Media] CDN upload started', {
+      operationId,
+      host: log.describeUrl(uploadUrl),
+      bytes: ciphertext.length,
+      proxy: Boolean(agent),
+    });
     const uploadResp = await fetch(uploadUrl, {
       method: 'POST',
       body: ciphertext,
@@ -724,6 +909,12 @@ export class VsChatClient extends vscode.Disposable {
     } as RequestInit);
     if (!uploadResp.ok) {
       const body = await uploadResp.text().catch(() => '');
+      log.error('[WX Media] CDN upload rejected', {
+        operationId,
+        status: uploadResp.status,
+        durationMs: Date.now() - uploadStartedAt,
+        responseLength: body.length,
+      });
       throw new Error(`Upload failed: ${uploadResp.status} - ${body}`);
     }
 
@@ -734,7 +925,12 @@ export class VsChatClient extends vscode.Disposable {
     // aes_key: base64-encode the hex string (matching official openclaw-weixin)
     const mediaAesKey = Buffer.from(aesKey.toString('hex')).toString('base64');
 
-    log.info('Image uploaded, downloadParam length=', downloadEncryptedParam.length);
+    log.info('[WX Media] CDN upload completed', {
+      operationId,
+      status: uploadResp.status,
+      encryptedParamLength: downloadEncryptedParam.length,
+      durationMs: Date.now() - uploadStartedAt,
+    });
 
     // Send message with image reference (matching official openclaw-weixin format)
     const msgId = this.nextMessageId();
@@ -769,7 +965,14 @@ export class VsChatClient extends vscode.Disposable {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    log.info('sendImage response:', JSON.stringify(resp));
+    log.info('[WX Send] image response', {
+      operationId,
+      messageId: msgId,
+      responseMessageId: resp?.message_id,
+      ret: resp?.ret,
+      errcode: resp?.errcode,
+      errmsg: resp?.errmsg,
+    });
     // iLink omits `ret` on success; only an explicit ret != 0 is an error.
     if (!resp || (typeof resp.ret === 'number' && resp.ret !== 0)) {
       return { resp, warning, tokenUsed: contextToken };
@@ -780,7 +983,12 @@ export class VsChatClient extends vscode.Disposable {
       const notDelivered =
         `图片消息可能未送达：iLink 返回 ${JSON.stringify(resp)} 但无 message_id，通常表示接口接受后未真正投递。` +
         `请让对方确认是否收到；若持续如此，可能是 bot 账号被平台风控，建议重新扫码登录并降低发送频率。`;
-      log.warn('send image: accepted without message_id — possibly not delivered');
+      log.warn('[WX Send] image accepted without message_id; delivery is unconfirmed', {
+        operationId,
+        messageId: msgId,
+        ret: resp.ret,
+        errcode: resp.errcode,
+      });
       warning = warning ? `${warning}\n${notDelivered}` : notDelivered;
     }
 
@@ -796,6 +1004,7 @@ export class VsChatClient extends vscode.Disposable {
     };
 
     const id = await this.db.insertMessage(chatMsg);
+    log.debug('[WX Send] image persisted', { dbId: id, messageId: msgId, operationId });
     this._onMessage.fire({ ...chatMsg, id });
     return { resp, warning, tokenUsed: contextToken };
   }
@@ -812,9 +1021,17 @@ export class VsChatClient extends vscode.Disposable {
     let last: SendAttemptResult | undefined;
 
     for (let i = 0; i < MAX_RATE_LIMIT_ATTEMPTS; i++) {
+      log.debug('[WX Send] attempt started', { label, attempt: i + 1, tokenless });
       const result = await attempt({ tokenless });
       last = result;
       const kind = this.classifySendFailure(result.resp);
+      log.debug('[WX Send] attempt classified', {
+        label,
+        attempt: i + 1,
+        result: kind || 'accepted',
+        ret: result.resp?.ret,
+        errcode: result.resp?.errcode,
+      });
       if (kind === null) return result; // confirmed accepted
 
       if (kind === 'stale-session' && !tokenless) {
@@ -823,13 +1040,18 @@ export class VsChatClient extends vscode.Disposable {
         // token — the session itself may still be alive (hermes-agent #80426).
         tokenless = true;
         await this.invalidateStaleContextToken(result.tokenUsed || '');
-        log.warn(`send ${label}: stale context_token, retrying without token`);
+        log.warn('[WX Send] stale context token; retrying without token', { label, attempt: i + 1 });
         continue;
       }
 
       if (kind === 'rate-limit' && i < MAX_RATE_LIMIT_ATTEMPTS - 1) {
         const delay = RATE_LIMIT_BACKOFF_MS[i] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
-        log.warn(`send ${label}: rate limited, backing off ${delay}ms (attempt ${i + 1}/${MAX_RATE_LIMIT_ATTEMPTS - 1})`);
+        log.warn('[WX Send] rate limited; retry scheduled', {
+          label,
+          attempt: i + 1,
+          nextAttempt: i + 2,
+          delayMs: delay,
+        });
         await this.sleep(delay);
         continue;
       }
@@ -920,15 +1142,21 @@ export class VsChatClient extends vscode.Disposable {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private safeRequestPath(value: string): string {
+    return value.replace(/([?&]qrcode=)[^&]+/gi, '$1[REDACTED]');
+  }
+
   private emitQrCode(data: string): void {
     this._onQrCode.fire(data);
   }
 
   private emitStatus(text: string): void {
+    log.debug('[WX Status]', text);
     this._onStatus.fire(text);
   }
 
   async logout(): Promise<void> {
+    log.info('[WX Auth] logout requested; clearing session credentials');
     this.stopPolling();
     this._connected = false;
     this.botToken = '';
@@ -937,12 +1165,13 @@ export class VsChatClient extends vscode.Disposable {
     try {
       const filePath = path.join(this.context.globalStorageUri.fsPath, 'credentials.json');
       await fs.promises.unlink(filePath);
-    } catch {
-      // File doesn't exist — that's fine
+    } catch (err) {
+      log.debug('[WX Auth] fallback credential file was already absent', log.formatError(err));
     }
   }
 
   dispose(): void {
+    log.debug('[WX] disposing client');
     this.stopPolling();
     this._onMessage.dispose();
     this._onStatus.dispose();

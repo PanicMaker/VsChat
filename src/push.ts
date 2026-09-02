@@ -13,6 +13,8 @@ export function previewForNotification(msg: ChatMessage): string {
     const content = msg.content || '';
     return content.startsWith('{') ? '[语音消息]' : `[语音] ${content}`;
   }
+  if (msg.type === 4) return `[文件] ${msg.content || ''}`.trim();
+  if (msg.type === 5) return '[视频]';
   return '[Image]';
 }
 
@@ -31,7 +33,7 @@ export async function sendBarkPush(title: string, message: string): Promise<bool
   const config = vscode.workspace.getConfiguration('vschat');
   const barkUrl = (config.get<string>('barkUrl') || '').trim();
   if (!barkUrl) {
-    log.info('Bark push skipped: vschat.barkUrl not configured');
+    log.debug('[Bark] push skipped; vschat.barkUrl is not configured');
     return false;
   }
 
@@ -50,22 +52,39 @@ export async function sendBarkPush(title: string, message: string): Promise<bool
   }
 
   try {
+    const operationId = log.nextId('bark');
+    const startedAt = Date.now();
+    log.debug('[Bark] push request', {
+      operationId,
+      endpoint: log.describeUrl(url),
+      titleLength: title.length,
+      messageLength: safeMessage.length,
+    });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
       const resp = await fetch(url, { signal: controller.signal });
       if (!resp.ok) {
-        log.error('Bark push failed, HTTP', resp.status);
+        log.error('[Bark] push rejected', {
+          operationId,
+          status: resp.status,
+          durationMs: Date.now() - startedAt,
+        });
         return false;
       }
       const body = await resp.text();
-      log.info('Bark push sent, response:', body.slice(0, 200));
+      log.info('[Bark] push accepted', {
+        operationId,
+        status: resp.status,
+        responseBytes: Buffer.byteLength(body),
+        durationMs: Date.now() - startedAt,
+      });
       return true;
     } finally {
       clearTimeout(timer);
     }
   } catch (err) {
-    log.error('Bark push error:', err instanceof Error ? err.message : String(err));
+    log.error('[Bark] push failed', log.formatError(err));
     return false;
   }
 }
