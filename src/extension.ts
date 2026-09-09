@@ -7,6 +7,7 @@ import { ChatViewProvider } from './chat-view-provider';
 import { sendBarkPush, previewForNotification } from './push';
 import { checkForUpdates, scheduleAutoUpdates } from './updater';
 import * as log from './logger';
+import { normalizeQqContent } from './qq-content';
 
 let client: ChatClient | undefined;
 let db: ChatDB | undefined;
@@ -32,6 +33,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     throw err;
   }
   log.info('[DB] initialized', { channel: configuredChannel });
+  if (configuredChannel === 'qq') {
+    try {
+      const normalization = await db.normalizeMessageText(normalizeQqContent);
+      log.info('[QQ History] face markup scan completed', normalization);
+    } catch (err) {
+      // A failed legacy-data cleanup must not prevent new QQ messages from working.
+      log.error('[QQ History] face markup scan failed', log.formatError(err));
+    }
+  }
 
   // Initialize the selected chat transport.
   client = configuredChannel === 'qq'

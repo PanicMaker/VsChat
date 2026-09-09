@@ -6,6 +6,7 @@ import { fetch, ProxyAgent, RequestInit, WebSocket } from 'undici';
 import { ChatDB } from './chat-db';
 import { ChatMessage, MsgType, MsgTypeValue, ReplyTo } from './types';
 import * as log from './logger';
+import { parseQqContent } from './qq-content';
 
 const API_BASE_URL = 'https://api.bot.qq.com';
 const ACCESS_TOKEN_URL = `${API_BASE_URL}/app/getAppAccessToken`;
@@ -388,8 +389,9 @@ export class QqBotClient extends vscode.Disposable {
 
     const attachment = message.attachments?.[0];
     const contentType = attachment?.content_type || '';
+    const parsedContent = parseQqContent(message.content || '');
     let type: MsgTypeValue = MsgType.Text;
-    let content = message.content || '';
+    let content = parsedContent.text;
     let imageDataUrl: string | undefined;
     log.info('[QQ Receive] C2C message', {
       messageId: message.id,
@@ -399,6 +401,8 @@ export class QqBotClient extends vscode.Disposable {
       attachmentCount: message.attachments?.length || 0,
       attachmentType: contentType || undefined,
       hasQuote: Boolean(message.message_scene?.ext?.some((value) => value.startsWith('ref_msg_idx='))),
+      faceCount: parsedContent.faceCount,
+      faceFallbackCount: parsedContent.fallbackCount,
       timestamp: message.timestamp,
     });
 
@@ -419,7 +423,7 @@ export class QqBotClient extends vscode.Disposable {
     const ext = message.message_scene?.ext || [];
     const referenceId = this.extValue(ext, 'msg_idx');
     const quotedReferenceId = this.extValue(ext, 'ref_msg_idx');
-    const quotedText = message.msg_elements?.[0]?.content || '';
+    const quotedText = parseQqContent(message.msg_elements?.[0]?.content || '').text;
     const replyTo = quotedReferenceId || quotedText
       ? JSON.stringify({
           messageId: quotedReferenceId || '',

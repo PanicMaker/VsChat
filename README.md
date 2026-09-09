@@ -56,6 +56,7 @@
 ### QQ 通道实现范围与平台规则
 
 - 支持单聊文本、图片发送，以及文本、图片、语音转写和文件事件展示。
+- QQ 原生表情标签会读取 `ext` 中的 Base64 描述并显示为 `[表情名]`（例如 `[白眼]`）；无法解码时回退为 `[QQ表情 #faceId]`，启动 QQ 通道时也会自动修正历史消息中的同类标签。
 - 图片按官方流程执行 `upload_prepare` → 预签名 URL 分片 PUT → `upload_part_finish` → `/files` 合并 → `msg_type=7` 发送。
 - 相同 QQ 消息可能重复推送，插件按事件消息 ID 去重；Gateway 序列号和 Session ID 会持久化以便断线恢复。
 - 用户发来消息后的 60 分钟内，插件优先携带 `msg_id` 作为被动回复（每条最多 4 次）；更早的发送会转为主动消息，引用仍可使用 `message_reference`。主动消息受用户接收开关与 QQ 平台频控约束，详见 [消息收发概述](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)。
@@ -89,6 +90,7 @@ VsChat/
 │   ├── wx-client.ts             # 微信客户端：扫码、轮询、收发消息、CDN 上传
 │   ├── wx-types.ts              # 微信 iLink 专用协议类型
 │   ├── qq-bot-client.ts         # QQ 客户端：Token、Gateway、单聊与分片上传
+│   ├── qq-content.ts            # QQ 表情标签解析与历史文本规范化
 │   ├── chat-view-provider.ts     # WebviewView 提供者：桥接 UI 与客户端
 │   ├── chat-db.ts                # SQLite 数据库：消息与元数据持久化
 │   └── types.ts                  # 微信/QQ 共用的聊天与 Webview 类型

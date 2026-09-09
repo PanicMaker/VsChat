@@ -183,6 +183,58 @@ export class ChatDB {
     log.info('[DB] chat history cleared', { channel: this.channel });
   }
 
+  async normalizeMessageText(
+    normalizer: (value: string) => string
+  ): Promise<{ scanned: number; contentUpdated: number; replyUpdated: number }> {
+    if (!this.db) return { scanned: 0, contentUpdated: 0, replyUpdated: 0 };
+    const result = this.db.exec('SELECT id, content, reply_to FROM messages');
+    const rows = result[0]?.values ?? [];
+    let contentUpdated = 0;
+    let replyUpdated = 0;
+
+    this.db.run('BEGIN TRANSACTION');
+    try {
+      for (const row of rows) {
+        const id = Number(row[0]);
+        const content = String(row[1] ?? '');
+        const replyTo = typeof row[2] === 'string' ? row[2] : null;
+        const normalizedContent = normalizer(content);
+        let normalizedReplyTo = replyTo;
+
+        if (replyTo) {
+          try {
+            const parsed = JSON.parse(replyTo);
+            if (parsed && typeof parsed.text === 'string') {
+              const normalizedText = normalizer(parsed.text);
+              if (normalizedText !== parsed.text) {
+                parsed.text = normalizedText;
+                normalizedReplyTo = JSON.stringify(parsed);
+                replyUpdated += 1;
+              }
+            }
+          } catch {
+            // Preserve malformed legacy reply metadata instead of discarding it.
+          }
+        }
+
+        if (normalizedContent !== content) contentUpdated += 1;
+        if (normalizedContent !== content || normalizedReplyTo !== replyTo) {
+          this.db.run(
+            'UPDATE messages SET content = ?, reply_to = ? WHERE id = ?',
+            [normalizedContent, normalizedReplyTo, id]
+          );
+        }
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+
+    if (contentUpdated || replyUpdated) this.save();
+    return { scanned: rows.length, contentUpdated, replyUpdated };
+  }
+
   async setMetadata(key: string, value: string): Promise<void> {
     if (!this.db) return;
     this.db.run(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`, [key, value]);
