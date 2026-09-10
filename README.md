@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.9.0-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.9.1-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中通过微信或 QQ 直接聊天。微信通道基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin)，QQ 通道基于官方 [QQ Bot API v2](https://bot.q.qq.com/wiki/develop/api-v2/)。两个通道共用聊天界面，但凭据、连接和历史记录彼此隔离。

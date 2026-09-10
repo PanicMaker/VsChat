@@ -2,7 +2,7 @@
   "name": "vschat",
   "displayName": "VsChat",
   "description": "Chat through WeChat iLink or QQ Bot directly in VSCode",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "publisher": "PanicMaker",
   "repository": {
     "type": "git",
