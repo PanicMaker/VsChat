@@ -743,3 +743,21 @@ body.mode-git #emoji-btn:hover {
   border: none;
   cursor: pointer;
 }
+#load-more-history {
+  display: block;
+  margin: 8px auto;
+  padding: 6px 12px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  cursor: pointer;
+}
+
+#load-more-history:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+#load-more-history.hidden {
+  display: none;
+}

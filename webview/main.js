@@ -11,6 +11,7 @@
   const loginStatus = document.getElementById('login-status');
   const qrcodeImg = document.getElementById('qrcode');
   const chatContainer = document.getElementById('chat-container');
+  const loadMoreHistoryBtn = document.getElementById('load-more-history');
   const inputBar = document.getElementById('input-bar');
   const quoteBar = document.getElementById('quote-bar');
   const quotePreview = document.getElementById('quote-preview');
@@ -42,6 +43,7 @@
   let currentMode = 'chat';
   let hasPartner = false;
   let allMessages = []; // keep messages for re-render on mode switch
+  let loadingHistory = false;
   let quoteTarget = null; // { messageId, type, text, timestamp }
 
   // Restore saved mode
@@ -448,15 +450,41 @@
     resetLightboxTransform();
   }
 
-  function loadHistory(messages) {
-    allMessages = messages;
+  function loadHistory(messages, older, hasMore) {
+    const previousHeight = chatContainer.scrollHeight;
+    const previousTop = chatContainer.scrollTop;
+    const followBottom = allMessages.length === 0
+      || previousHeight - previousTop - chatContainer.clientHeight < 80;
+    // A live message can arrive while the host hydrates a history page.
+    // Merge by DB id rather than replacing the list with an older snapshot.
+    const merged = new Map(allMessages.map((msg) => [msg.id, msg]));
+    for (const msg of messages) merged.set(msg.id, { ...merged.get(msg.id), ...msg });
+    allMessages = [...merged.values()].sort((a, b) => a.id - b.id);
+    loadingHistory = false;
+    loadMoreHistoryBtn.disabled = false;
+    loadMoreHistoryBtn.textContent = '加载更早消息';
+    loadMoreHistoryBtn.classList.toggle('hidden', !hasMore);
     lastRenderedDate = '';
     messagesEl.innerHTML = '';
-    for (const msg of messages) {
+    for (const msg of allMessages) {
       renderMessage(msg);
     }
-    scrollToBottom();
+    if (older) {
+      chatContainer.scrollTop = previousTop + chatContainer.scrollHeight - previousHeight;
+    } else if (followBottom) {
+      scrollToBottom();
+    } else {
+      chatContainer.scrollTop = previousTop;
+    }
   }
+
+  loadMoreHistoryBtn.addEventListener('click', () => {
+    if (loadingHistory || !allMessages.length) return;
+    loadingHistory = true;
+    loadMoreHistoryBtn.disabled = true;
+    loadMoreHistoryBtn.textContent = '加载中…';
+    vscode.postMessage({ command: 'loadMoreHistory', beforeId: allMessages[0].id });
+  });
 
   // ---- Events ----
 
@@ -619,7 +647,7 @@
 
     switch (message.command) {
       case 'loadHistory':
-        loadHistory(message.messages || []);
+        loadHistory(message.messages || [], Boolean(message.older), Boolean(message.hasMore));
         hasPartner = message.messages && message.messages.length > 0;
         loginScreen.classList.add('hidden');
         chatContainer.classList.remove('hidden');
@@ -633,8 +661,14 @@
             chatContainer.classList.remove('hidden');
             inputBar.classList.remove('hidden');
           }
-          allMessages.push(message.message);
-          renderMessage(message.message);
+          if (!allMessages.some((msg) => msg.id === message.message.id)) {
+            const outOfOrder = allMessages.length > 0
+              && message.message.id < allMessages[allMessages.length - 1].id;
+            allMessages.push(message.message);
+            allMessages.sort((a, b) => a.id - b.id);
+            if (outOfOrder) reRenderAll();
+            else renderMessage(message.message);
+          }
           hasPartner = true;
         }
         break;
@@ -642,6 +676,15 @@
       case 'clearHistory':
         allMessages = [];
         messagesEl.innerHTML = '';
+        loadingHistory = false;
+        loadMoreHistoryBtn.disabled = false;
+        loadMoreHistoryBtn.classList.add('hidden');
+        break;
+
+      case 'historyError':
+        loadingHistory = false;
+        loadMoreHistoryBtn.disabled = false;
+        loadMoreHistoryBtn.textContent = '重试加载更早消息';
         break;
 
       case 'qrcode':

@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.9.1-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.9.2-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中通过微信或 QQ 直接聊天。微信通道基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin)，QQ 通道基于官方 [QQ Bot API v2](https://bot.q.qq.com/wiki/develop/api-v2/)。两个通道共用聊天界面，但凭据、连接和历史记录彼此隔离。
@@ -20,6 +20,7 @@
 - ↩️ **引用回复** — 微信保留原引用逻辑；QQ 使用 `msg_id` 与 `message_reference`
 - 🔍 **图片预览** — 点击接收的图片在 Lightbox 中全屏查看
 - 💾 **消息持久化** — 基于 SQLite 的本地消息存储，重启后保留历史
+- 📜 **历史分页** — 首次加载最近 100 条，点击聊天顶部“加载更早消息”继续查看；重连保留已加载的历史，离线也可查看本地记录
 - 🔄 **会话恢复** — 自动恢复上一次登录会话，无需重新扫码
 - 🌐 **代理支持** — 可配置 HTTP 代理
 - 📱 **Bark iPhone 推送** — 收到新消息时推送提醒到 iPhone，不再错过
@@ -65,6 +66,12 @@
 ### 切回微信
 
 将 `vschat.channel` 改为 `wechat` 并重载 VSCode。微信历史仍保存在原数据库中，QQ 历史使用独立的 `vschat_qq_chats.db`，切换不会覆盖另一通道的数据。
+
+### 历史记录与 Remote SSH
+
+多个扩展宿主共用同一聊天库时，读写会通过跨进程文件锁串行执行，每次操作读取最新数据库，保存采用临时文件原子替换。关闭窗口不再回写旧内存快照；首次写入已有数据库前会保留一份 `.db.bak` 备份。
+
+Remote SSH 的数据库位于远程主机的 `~/.vscode-server/data/User/globalStorage/panicmaker.vschat/`。升级后需关闭或重载所有使用 VsChat 的旧扩展宿主，让每个窗口都运行修复版；旧版进程不会遵守新的文件锁。已被旧版覆盖、且没有备份的消息无法从不含正文的诊断日志完整恢复。
 
 ### 🔄 自动更新（基于 GitHub Release）
 

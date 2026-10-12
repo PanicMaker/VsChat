@@ -12,6 +12,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private view: vscode.WebviewView | null = null;
   private disposables: vscode.Disposable[] = [];
+  private historyStartId: number | undefined;
+  private historyPending: Promise<void> = Promise.resolve();
+  private viewGeneration = 0;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -25,6 +28,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ): void {
     this.view = webviewView;
+    this.viewGeneration += 1;
+    this.historyStartId = undefined;
     log.info('[UI] chat view resolved', { channel: this.client.channelName, connected: this.client.connected });
 
     webviewView.webview.options = {
@@ -76,19 +81,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.disposables.push(
       this.client.onLoginSuccess(async () => {
         try {
-          const messages = await this.db.getRecentMessages(100);
-          this.postMessage({ command: 'loadHistory', messages });
+          await this.loadHistory();
         } catch (err) {
           log.warn('[UI] history load after login failed', { channel: this.client.channelName }, log.formatError(err));
         }
       })
     );
 
-    // Load history if already connected
-    if (this.client.connected) {
-      // Delay slightly to ensure webview JS is ready
-      setTimeout(() => this.loadHistory(), 100);
-    }
+    // The webview's ready message loads persisted history even while offline.
   }
 
   private async handleWebViewMessage(msg: WebViewOutbound): Promise<void> {
@@ -127,26 +127,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           try { fs.unlinkSync(tempPath); } catch {}
         }
       } else if (msg.command === 'ready') {
-        // Webview is loaded and ready — load history if connected
-        if (this.client.connected) {
-          await this.loadHistory();
-        }
+        await this.loadHistory();
       } else if (msg.command === 'login') {
         vscode.commands.executeCommand('vschat.login');
       } else if (msg.command === 'openExternal' && msg.url) {
         vscode.env.openExternal(vscode.Uri.parse(msg.url));
       } else if (msg.command === 'loadMoreHistory') {
-        // Could implement pagination here
+        if (Number.isSafeInteger(msg.beforeId) && msg.beforeId! > 0) {
+          await this.loadHistory(msg.beforeId);
+        }
       }
     } catch (err: any) {
       log.error('[UI] command failed', { operationId, command: msg.command, channel: this.client.channelName }, log.formatError(err));
       this.postMessage({ command: 'error', error: err.message });
+      if (msg.command === 'loadMoreHistory') this.postMessage({ command: 'historyError' });
     }
   }
 
-  async loadHistory(): Promise<void> {
+  loadHistory(beforeId?: number): Promise<void> {
+    const generation = this.viewGeneration;
+    const task = this.historyPending.then(() => this.loadHistoryPage(beforeId, generation));
+    this.historyPending = task.catch(() => undefined);
+    return task;
+  }
+
+  private async loadHistoryPage(beforeId: number | undefined, generation: number): Promise<void> {
+    if (generation !== this.viewGeneration) return;
     const startedAt = Date.now();
-    const messages = await this.db.getRecentMessages(100);
+    const older = beforeId !== undefined;
+    let messages: ChatMessage[];
+    let hasMore: boolean;
+    if (!older && this.historyStartId !== undefined) {
+      // Refresh the whole loaded range so reconnection fills gaps without
+      // discarding history the user already paged through.
+      messages = await this.db.getMessagesFromId(this.historyStartId);
+      hasMore = (await this.db.getRecentMessages(1, this.historyStartId)).length > 0;
+    } else {
+      const page = await this.db.getRecentMessages(101, beforeId);
+      hasMore = page.length > 100;
+      messages = hasMore ? page.slice(1) : page;
+    }
     // Attach persisted image data for image messages
     const messagesWithImages = await Promise.all(
       messages.map(async (msg) => {
@@ -158,17 +178,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return msg;
       })
     );
-    this.postMessage({ command: 'loadHistory', messages: messagesWithImages });
+    if (generation !== this.viewGeneration) return;
+    if (messages.length) {
+      this.historyStartId = Math.min(this.historyStartId ?? Infinity, messages[0].id);
+    }
+    this.postMessage({ command: 'loadHistory', messages: messagesWithImages, hasMore, older });
     log.info('[UI] history loaded', {
       channel: this.client.channelName,
       messageCount: messagesWithImages.length,
+      hasMore,
+      older,
       durationMs: Date.now() - startedAt,
     });
   }
 
   async clearHistory(): Promise<void> {
     log.info('[UI] clearing history', { channel: this.client.channelName });
+    this.viewGeneration += 1;
+    await this.historyPending;
     await this.db.clearAll();
+    this.historyStartId = undefined;
     // Clear only the active channel's media; the other channel's history and
     // files intentionally survive transport switching.
     try {
@@ -212,6 +241,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <img id="qrcode" class="hidden" alt="Scan QR code">
         </div>
         <div id="chat-container">
+          <button id="load-more-history" class="hidden" type="button">加载更早消息</button>
           <div id="messages"></div>
         </div>
         <div id="input-bar">

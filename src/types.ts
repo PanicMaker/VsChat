@@ -43,6 +43,7 @@ export interface WebViewOutbound {
   fileName?: string;
   url?: string;
   replyTo?: ReplyTo;
+  beforeId?: number; // exclusive cursor for older history pages
 }
 
 // Message from extension host to WebView
@@ -55,4 +56,6 @@ export interface WebViewInbound {
   error?: string;
   warning?: string; // non-blocking warning (e.g. stale session)
   imageDataUrl?: string | null; // decrypted image data URL for webview
+  hasMore?: boolean;
+  older?: boolean;
 }

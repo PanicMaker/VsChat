@@ -4,6 +4,11 @@
 src/
 node_modules/
 docs/
+tests/
+dist/**
+!dist/extension.js
+!dist/extension.js.map
+!dist/sql-wasm.wasm
 .claude/
 tsconfig.json
 **/*.ts.map
