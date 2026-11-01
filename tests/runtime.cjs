@@ -7,6 +7,19 @@ const originalLoad = Module._load;
 Module._load = function (name, ...args) {
   if (name === 'vscode') return {
     window: { createOutputChannel: () => ({ appendLine() {}, dispose() {} }) },
+    Disposable: class {
+      constructor(callback) { this.callback = callback; }
+      dispose() { this.callback?.(); }
+    },
+    EventEmitter: class {
+      listeners = new Set();
+      event = (listener) => {
+        this.listeners.add(listener);
+        return { dispose: () => this.listeners.delete(listener) };
+      };
+      fire(value) { for (const listener of this.listeners) listener(value); }
+      dispose() { this.listeners.clear(); }
+    },
   };
   return originalLoad.call(this, name, ...args);
 };

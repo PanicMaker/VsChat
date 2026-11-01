@@ -7,6 +7,12 @@ import * as lockfile from 'proper-lockfile';
 import { ChatMessage, MsgTypeValue } from './types';
 import * as log from './logger';
 
+export interface QqReplyContext {
+  messageId: string;
+  sequence: number;
+  timestamp: number;
+}
+
 export class ChatDB {
   private SQL: SqlJsStatic | null = null;
   private pending: Promise<unknown> = Promise.resolve();
@@ -56,12 +62,35 @@ export class ChatDB {
         )
       `);
       this.migrate(db);
+      if (this.channel === 'qq') this.initQqReplyContexts(db);
     }, true);
     this.initialized = true;
     log.info('[DB] database ready', {
       channel: this.channel,
       durationMs: Date.now() - startedAt,
     });
+  }
+
+  private initQqReplyContexts(db: Database): void {
+    if (db.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'qq_reply_contexts'").length) return;
+    db.run(`CREATE TABLE qq_reply_contexts (
+      app_id TEXT NOT NULL,
+      open_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      sequence INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (app_id, open_id, message_id)
+    );
+    CREATE INDEX qq_reply_contexts_recent ON qq_reply_contexts(app_id, open_id, timestamp DESC)`);
+    // Old versions reset their single global counter when switching messages.
+    // Its value cannot reliably tell us which sequences QQ has already seen.
+    // Retire pre-upgrade contexts instead of risking reusing an accepted pair.
+    db.run(`INSERT OR IGNORE INTO qq_reply_contexts
+      (app_id, open_id, message_id, timestamp, sequence)
+      SELECT to_user_id, from_user_id, message_id, MAX(timestamp), 2147483647
+      FROM messages WHERE direction = 'received' AND message_id IS NOT NULL
+        AND to_user_id IS NOT NULL AND from_user_id IS NOT NULL
+      GROUP BY to_user_id, from_user_id, message_id`);
   }
 
   private migrate(db: Database): void {
@@ -166,36 +195,7 @@ export class ChatDB {
   }
 
   async insertMessage(msg: Omit<ChatMessage, 'id'>): Promise<number> {
-    const id = await this.withDatabase((db) => {
-      // Two extension hosts may receive the same transport event concurrently.
-      if (msg.message_id) {
-        const existing = db.exec(
-          'SELECT id FROM messages WHERE message_id = ? AND direction = ? LIMIT 1',
-          [msg.message_id, msg.direction]
-        );
-        if (existing[0]?.values.length) return Number(existing[0].values[0][0]);
-      }
-      db.run(
-        `INSERT INTO messages (direction, type, content, timestamp, context_token, from_user_id, to_user_id, message_id, reference_id, reply_to)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          msg.direction,
-          msg.type,
-          msg.content,
-          msg.timestamp,
-          msg.context_token || '',
-          msg.from_user_id,
-          msg.to_user_id,
-          msg.message_id || null,
-          msg.reference_id || null,
-          msg.reply_to || null,
-        ]
-      );
-
-      // Get the ID before save() — sql.js preserves last_insert_rowid()
-      const row = db.exec('SELECT last_insert_rowid()');
-      return row[0]?.values[0]?.[0] as number;
-    }, true);
+    const { id } = await this.withDatabase((db) => this.insertMessageRow(db, msg), true);
     log.debug('[DB] message inserted', {
       channel: this.channel,
       dbId: id,
@@ -206,6 +206,90 @@ export class ChatDB {
       hasReference: Boolean(msg.reference_id || msg.reply_to),
     });
     return id;
+  }
+
+  private insertMessageRow(db: Database, msg: Omit<ChatMessage, 'id'>): { id: number; inserted: boolean } {
+    // Two extension hosts may receive the same transport event concurrently.
+    if (msg.message_id) {
+      const existing = db.exec(
+        'SELECT id FROM messages WHERE message_id = ? AND direction = ? LIMIT 1',
+        [msg.message_id, msg.direction]
+      );
+      if (existing[0]?.values.length) return { id: Number(existing[0].values[0][0]), inserted: false };
+    }
+    db.run(
+      `INSERT INTO messages (direction, type, content, timestamp, context_token, from_user_id, to_user_id, message_id, reference_id, reply_to)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        msg.direction,
+        msg.type,
+        msg.content,
+        msg.timestamp,
+        msg.context_token || '',
+        msg.from_user_id,
+        msg.to_user_id,
+        msg.message_id || null,
+        msg.reference_id || null,
+        msg.reply_to || null,
+      ]
+    );
+
+    // Get the ID before save() — sql.js preserves last_insert_rowid()
+    const row = db.exec('SELECT last_insert_rowid()');
+    return { id: row[0]?.values[0]?.[0] as number, inserted: true };
+  }
+
+  /** Deduplication, inbound persistence and routing advance share one disk lock. */
+  async storeQqInbound(msg: Omit<ChatMessage, 'id'>): Promise<{
+    id: number; inserted: boolean; latestAdvanced: boolean;
+  }> {
+    if (this.channel !== 'qq' || msg.direction !== 'received' || !msg.message_id || !msg.from_user_id || !msg.to_user_id) {
+      throw new Error('Invalid QQ inbound context');
+    }
+    return this.withDatabase((db) => {
+      const result = this.insertMessageRow(db, msg);
+      const known = db.exec(`SELECT 1 FROM qq_reply_contexts
+        WHERE app_id = ? AND open_id = ? AND message_id = ?`,
+      [msg.to_user_id, msg.from_user_id, msg.message_id!]);
+      db.run(`INSERT OR IGNORE INTO qq_reply_contexts
+        (app_id, open_id, message_id, timestamp) VALUES (?, ?, ?, ?)`,
+      [msg.to_user_id, msg.from_user_id, msg.message_id!, msg.timestamp]);
+      const latest = db.exec("SELECT value FROM metadata WHERE key = 'qq_last_inbound_timestamp'");
+      const latestTimestamp = Number(latest[0]?.values[0]?.[0] || 0);
+      const latestAdvanced = !known.length && msg.timestamp >= latestTimestamp;
+      if (latestAdvanced) {
+        for (const [key, value] of [
+          ['qq_user_openid', msg.from_user_id],
+          ['qq_last_inbound_message_id', msg.message_id!],
+          ['qq_last_inbound_timestamp', String(msg.timestamp)],
+        ]) db.run('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [key, value]);
+      }
+      return { ...result, latestAdvanced };
+    }, true);
+  }
+
+  /** Reserve before HTTP, never roll back on failure: a timeout may mean delivered. */
+  async reserveQqReply(options: {
+    appId: string; openId: string; messageId?: string;
+    nowSeconds: number; windowSeconds: number; maxReplies: number;
+  }): Promise<QqReplyContext | null> {
+    if (this.channel !== 'qq') throw new Error('QQ reply reservation requires QQ storage');
+    return this.withDatabase((db) => {
+      const { appId, openId, messageId, nowSeconds, windowSeconds, maxReplies } = options;
+      const rows = db.exec(`SELECT message_id, sequence, timestamp FROM qq_reply_contexts
+        WHERE app_id = ? AND open_id = ? AND timestamp BETWEEN ? AND ?
+        ${messageId === undefined ? '' : 'AND message_id = ?'}
+        ORDER BY timestamp DESC, rowid DESC LIMIT 1`,
+      [appId, openId, nowSeconds - windowSeconds, nowSeconds, ...(messageId === undefined ? [] : [messageId])]);
+      const row = rows[0]?.values[0];
+      // Do not silently switch to an older inbound when the newest is exhausted.
+      if (!row || Number(row[1]) >= maxReplies) return null;
+      const sequence = Number(row[1]) + 1;
+      db.run(`UPDATE qq_reply_contexts SET sequence = ?
+        WHERE app_id = ? AND open_id = ? AND message_id = ?`,
+      [sequence, appId, openId, String(row[0])]);
+      return { messageId: String(row[0]), sequence, timestamp: Number(row[2]) };
+    }, true);
   }
 
   async getRecentMessages(

@@ -206,7 +206,7 @@ export class QqBotClient extends vscode.Disposable {
       });
       const socket = new WebSocket(gateway.url, {
         ...(agent ? { dispatcher: agent } : {}),
-        headers: { 'User-Agent': 'VsChat/0.9.2' },
+        headers: { 'User-Agent': 'VsChat/0.9.3' },
       });
       this.socket = socket;
 
@@ -376,11 +376,6 @@ export class QqBotClient extends vscode.Disposable {
       log.warn('[QQ Receive] ignored event without message ID');
       return;
     }
-    if (await this.db.findByMessageId(message.id)) {
-      log.info('[QQ Receive] duplicate message skipped', { messageId: message.id });
-      return;
-    }
-
     const openId = message.author?.user_openid || message.author?.id || '';
     if (!openId) {
       log.warn('[QQ Receive] message skipped; user_openid missing', { messageId: message.id });
@@ -447,11 +442,17 @@ export class QqBotClient extends vscode.Disposable {
       reply_to: replyTo,
     };
 
-    await this.db.setMetadata('qq_user_openid', openId);
-    await this.db.setMetadata('qq_last_inbound_message_id', message.id);
-    await this.db.setMetadata('qq_last_inbound_timestamp', String(chatMessage.timestamp));
-    const id = await this.db.insertMessage(chatMessage);
-    log.debug('[QQ Receive] message persisted', { dbId: id, messageId: message.id, type });
+    const { id, inserted, latestAdvanced } = await this.db.storeQqInbound(chatMessage);
+    if (!inserted) {
+      log.info('[QQ Receive] duplicate event already persisted; routing unchanged', {
+        dbId: id,
+        eventKey: this.messageKey(message.id),
+      });
+      return;
+    }
+    log.info('[QQ Receive] message persisted', {
+      dbId: id, eventKey: this.messageKey(message.id), type, latestAdvanced,
+    });
     this._onMessage.fire({ ...chatMessage, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
   }
 
@@ -467,10 +468,13 @@ export class QqBotClient extends vscode.Disposable {
       : Number.POSITIVE_INFINITY;
     if (replyTo?.messageId && replyTo.direction === 'received' && replyAgeSeconds <= C2C_PASSIVE_REPLY_WINDOW_SECONDS) {
       // A quoted inbound QQ message can simultaneously be a passive reply.
-      body.msg_id = replyTo.messageId;
-      const sequence = await this.nextReplySequence(replyTo.messageId);
-      if (sequence) body.msg_seq = sequence;
-      else delete body.msg_id;
+      const reply = await this.reserveReply(openId, replyTo.messageId);
+      if (reply) {
+        body.msg_id = reply.messageId;
+        body.msg_seq = reply.sequence;
+      } else {
+        await this.applyRecentPassiveReply(openId, body);
+      }
     } else {
       await this.applyRecentPassiveReply(openId, body);
     }
@@ -484,6 +488,7 @@ export class QqBotClient extends vscode.Disposable {
       contentLength: text.length,
       mode: body.msg_id ? 'passive' : 'proactive',
       replySequence: body.msg_seq,
+      replyContextKey: this.messageKey(body.msg_id),
       hasReference: Boolean(body.message_reference),
     });
     const response = await this.sendMessage(openId, body);
@@ -592,6 +597,7 @@ export class QqBotClient extends vscode.Disposable {
       openId,
       mode: sendBody.msg_id ? 'passive' : 'proactive',
       replySequence: sendBody.msg_seq,
+      replyContextKey: this.messageKey(sendBody.msg_id),
     });
     const response = await this.sendMessage(openId, sendBody);
     log.info('[QQ Send] image accepted', {
@@ -677,7 +683,7 @@ export class QqBotClient extends vscode.Disposable {
       ...init,
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
-        'User-Agent': 'VsChat/0.9.2',
+        'User-Agent': 'VsChat/0.9.3',
         Authorization: `QQBot ${token}`,
         ...(init.headers as Record<string, string> || {}),
       },
@@ -758,7 +764,7 @@ export class QqBotClient extends vscode.Disposable {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'VsChat/0.9.2',
+        'User-Agent': 'VsChat/0.9.3',
       },
       body: JSON.stringify({ appId, clientSecret: appSecret }),
       dispatcher: this.getProxyAgent(),
@@ -826,49 +832,36 @@ export class QqBotClient extends vscode.Disposable {
 
   /** Prefer a recent passive reply, avoiding proactive-message restrictions. */
   private async applyRecentPassiveReply(openId: string, body: Record<string, unknown>): Promise<void> {
-    const latestUser = await this.db.getMetadata('qq_user_openid') || '';
-    const latestMessageId = await this.db.getMetadata('qq_last_inbound_message_id') || '';
-    const latestTimestamp = Number(await this.db.getMetadata('qq_last_inbound_timestamp') || 0);
-    const ageSeconds = Math.floor(Date.now() / 1000) - latestTimestamp;
-    if (openId !== latestUser || !latestMessageId || latestTimestamp <= 0 || ageSeconds > C2C_PASSIVE_REPLY_WINDOW_SECONDS) {
-      log.debug('[QQ Send] proactive mode selected', {
-        openId,
-        sameUser: openId === latestUser,
-        hasInboundMessage: Boolean(latestMessageId),
-        inboundAgeSeconds: latestTimestamp > 0 ? ageSeconds : undefined,
+    const reply = await this.reserveReply(openId);
+    if (!reply) {
+      log.warn('[QQ Send] no usable passive reply context; falling back to proactive mode', {
+        openId, hint: '请在 QQ 中给机器人发送一条新消息以获得新的被动回复额度',
       });
       return;
     }
-
-    const sequence = await this.nextReplySequence(latestMessageId);
-    if (!sequence) {
-      log.warn('[QQ Send] passive reply quota exhausted; falling back to proactive mode', {
-        openId,
-        messageId: latestMessageId,
-      });
-      return;
-    }
-    body.msg_id = latestMessageId;
-    body.msg_seq = sequence;
+    body.msg_id = reply.messageId;
+    body.msg_seq = reply.sequence;
     log.debug('[QQ Send] passive reply selected', {
       openId,
-      messageId: latestMessageId,
-      sequence,
-      inboundAgeSeconds: ageSeconds,
+      replyContextKey: this.messageKey(reply.messageId),
+      sequence: reply.sequence,
+      inboundAgeSeconds: Math.floor(Date.now() / 1000) - reply.timestamp,
     });
   }
 
-  private async nextReplySequence(messageId: string): Promise<number | null> {
-    const previousMessageId = await this.db.getMetadata('qq_reply_message_id') || '';
-    const previousSequence = previousMessageId === messageId
-      ? Number(await this.db.getMetadata('qq_reply_sequence') || 0)
-      : 0;
-    const sequence = previousSequence + 1;
-    // QQ allows at most four passive replies to one single-chat message.
-    if (sequence > C2C_MAX_PASSIVE_REPLIES) return null;
-    await this.db.setMetadata('qq_reply_message_id', messageId);
-    await this.db.setMetadata('qq_reply_sequence', String(sequence));
-    return sequence;
+  private async reserveReply(openId: string, messageId?: string) {
+    return this.db.reserveQqReply({
+      appId: await this.getAppId(), openId, messageId,
+      nowSeconds: Math.floor(Date.now() / 1000),
+      windowSeconds: C2C_PASSIVE_REPLY_WINDOW_SECONDS,
+      maxReplies: C2C_MAX_PASSIVE_REPLIES,
+    });
+  }
+
+  private messageKey(value: unknown): string | undefined {
+    return typeof value === 'string' && value
+      ? crypto.createHash('sha256').update(value).digest('hex').slice(0, 16)
+      : undefined;
   }
 
   private async putUploadPart(url: string, chunk: Buffer, index: number): Promise<void> {

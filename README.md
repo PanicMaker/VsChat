@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.9.2-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.9.3-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中通过微信或 QQ 直接聊天。微信通道基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin)，QQ 通道基于官方 [QQ Bot API v2](https://bot.q.qq.com/wiki/develop/api-v2/)。两个通道共用聊天界面，但凭据、连接和历史记录彼此隔离。
@@ -60,7 +60,9 @@
 - QQ 原生表情标签会读取 `ext` 中的 Base64 描述并显示为 `[表情名]`（例如 `[白眼]`）；无法解码时回退为 `[QQ表情 #faceId]`，启动 QQ 通道时也会自动修正历史消息中的同类标签。
 - 图片按官方流程执行 `upload_prepare` → 预签名 URL 分片 PUT → `upload_part_finish` → `/files` 合并 → `msg_type=7` 发送。
 - 相同 QQ 消息可能重复推送，插件按事件消息 ID 去重；Gateway 序列号和 Session ID 会持久化以便断线恢复。
-- 用户发来消息后的 60 分钟内，插件优先携带 `msg_id` 作为被动回复（每条最多 4 次）；更早的发送会转为主动消息，引用仍可使用 `message_reference`。主动消息受用户接收开关与 QQ 平台频控约束，详见 [消息收发概述](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)。
+- 多窗口共用同一数据库时，QQ 被动回复序号按 AppID、用户 OpenID 和入站消息 ID 独立持久化，在跨进程锁内原子分配；普通文本、引用和图片共用计数，引用切换、重载窗口及清空聊天记录都不会把序号重置为 `1`。发送失败也不会回收已分配的序号，避免网络超时后重用已被 QQ 接受的序号。
+- 入站消息的去重、落库和最近会话更新在同一锁内完成；延迟或重复事件不会把最近会话回退到旧消息。发送时从数据库一次性选取当前用户的最新有效上下文，不再分开读取多项共享状态。
+- 用户发来消息后的 60 分钟内，插件优先携带 `msg_id` 作为被动回复（插件保守限制每条最多 4 次，所有窗口共用此额度）；更早的发送会转为主动消息，引用仍可使用 `message_reference`。主动消息受用户接收开关与 QQ 平台频控约束，详见 [消息收发概述](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)。
 - 当前界面沿用单会话模型：未配置 `vschat.qqUserOpenId` 时，发送目标是最近与机器人单聊的用户。
 
 ### 切回微信
@@ -72,6 +74,8 @@
 多个扩展宿主共用同一聊天库时，读写会通过跨进程文件锁串行执行，每次操作读取最新数据库，保存采用临时文件原子替换。关闭窗口不再回写旧内存快照；首次写入已有数据库前会保留一份 `.db.bak` 备份。
 
 Remote SSH 的数据库位于远程主机的 `~/.vscode-server/data/User/globalStorage/panicmaker.vschat/`。升级后需关闭或重载所有使用 VsChat 的旧扩展宿主，让每个窗口都运行修复版；旧版进程不会遵守新的文件锁。已被旧版覆盖、且没有备份的消息无法从不含正文的诊断日志完整恢复。
+
+升级到 `0.9.3` 后，请重载所有使用 VsChat 的窗口（Remote SSH 需要在远程环境安装），再从 QQ 给机器人发送一条新消息。旧版本只有一组可能被重置的回复计数，无法可靠恢复每条消息已使用的序号；首次升级会保守停用升级前的回复上下文，但保留聊天正文。多窗口修复适用于共用同一个远程/本地存储目录的扩展宿主，不协调不同机器或不同 VS Code 用户数据目录中的独立实例。
 
 ### 🔄 自动更新（基于 GitHub Release）
 
@@ -239,6 +243,8 @@ npx vsce package
 出现连接、收发消息或媒体上传问题时，执行 **VsChat: Show Diagnostic Logs**。日志包含本次扩展运行标识、通道、请求编号、HTTP 状态、QQ 业务错误码与 Trace ID、请求耗时、Gateway 状态、重连/重试次数和消息类型等信息。
 
 日志不会记录 AppSecret、Access Token、微信会话 Token、AES 密钥或消息正文；AppID、OpenID、消息 ID、Session ID 和 Trace ID 会脱敏显示。向开发者反馈问题时，建议从扩展启动位置开始复制完整日志，以便通过请求编号串联故障链路。
+
+QQ 发送日志另含 `replyContextKey`（入站消息 ID 的 SHA-256 摘要前 16 位）和 `replySequence`，可跨窗口核对同一个回复上下文是否重复使用序号，避免不同消息 ID 的脱敏首尾相同造成误判。接收日志通过 `eventKey`、`dbId` 和 `latestAdvanced` 区分重复事件、实际落库及会话是否前进，不记录消息正文。
 
 ## 🔧 技术栈
 
