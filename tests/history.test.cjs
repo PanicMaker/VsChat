@@ -106,6 +106,26 @@ test('pasting an image stages bytes until confirmed and preserves the text draft
   assert.equal(input.value, 'draft');
 });
 
+test('sent images render inline live and after history reload, with full-size preview', () => {
+  const data = 'data:image/png;base64,AA==';
+  const msg = { id: 1, direction: 'sent', type: 2, content: '[Image]', timestamp: 1_700_000_000, imageDataUrl: data };
+  function images(el) {
+    return [...(el.className === 'message-image' ? [el] : []), ...el.children.flatMap(images)];
+  }
+  const ui = webview();
+  ui.receive({ command: 'newMessage', message: msg });
+  const rendered = images(ui.element('messages'));
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].src, data);
+  rendered[0].click();
+  assert.equal(ui.element('lightbox-img').src, data);
+  const reloaded = webview();
+  reloaded.receive({ command: 'loadHistory', messages: [msg], hasMore: false });
+  assert.equal(images(reloaded.element('messages'))[0].src, data);
+  reloaded.receive({ command: 'newMessage', message: { ...msg, id: 2, imageDataUrl: undefined } });
+  assert.equal(images(reloaded.element('messages')).length, 1);
+});
+
 test('webview merges live messages, older pages and reconnect snapshots without dropping or duplicating rows', () => {
   const ui = webview();
   ui.receive({ command: 'loadHistory', messages: [message(3), message(4)], hasMore: true });

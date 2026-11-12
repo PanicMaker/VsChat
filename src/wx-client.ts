@@ -1005,7 +1005,16 @@ export class WxClient extends vscode.Disposable {
 
     const id = await this.db.insertMessage(chatMsg);
     log.debug('[WX Send] image persisted', { dbId: id, messageId: msgId, operationId });
-    this._onMessage.fire({ ...chatMsg, id });
+    const extension = path.extname(imagePath).toLowerCase();
+    const mimeType = extension === '.jpg' || extension === '.jpeg'
+      ? 'image/jpeg'
+      : extension === '.gif' ? 'image/gif'
+      : extension === '.webp' ? 'image/webp'
+      : extension === '.bmp' ? 'image/bmp'
+      : 'image/png';
+    const imageDataUrl = `data:${mimeType};base64,${fileData.toString('base64')}`;
+    await this.persistImage(id, imageDataUrl);
+    this._onMessage.fire({ ...chatMsg, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
     return { resp, warning, tokenUsed: contextToken };
   }
 

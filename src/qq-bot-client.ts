@@ -206,7 +206,7 @@ export class QqBotClient extends vscode.Disposable {
       });
       const socket = new WebSocket(gateway.url, {
         ...(agent ? { dispatcher: agent } : {}),
-        headers: { 'User-Agent': 'VsChat/0.9.4' },
+        headers: { 'User-Agent': 'VsChat/0.9.5' },
       });
       this.socket = socket;
 
@@ -683,7 +683,7 @@ export class QqBotClient extends vscode.Disposable {
       ...init,
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
-        'User-Agent': 'VsChat/0.9.4',
+        'User-Agent': 'VsChat/0.9.5',
         Authorization: `QQBot ${token}`,
         ...(init.headers as Record<string, string> || {}),
       },
@@ -764,7 +764,7 @@ export class QqBotClient extends vscode.Disposable {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'VsChat/0.9.4',
+        'User-Agent': 'VsChat/0.9.5',
       },
       body: JSON.stringify({ appId, clientSecret: appSecret }),
       dispatcher: this.getProxyAgent(),

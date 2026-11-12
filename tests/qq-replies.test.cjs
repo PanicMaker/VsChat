@@ -170,7 +170,11 @@ test('actual clients share sequences for quoted text, images and normal replies 
   await right.sendText('quote a again', quote);
   const image = path.join(dir, 'sample.png');
   fs.writeFileSync(image, Buffer.from([0]));
+  let sentImage;
+  left.onMessage(msg => { if (msg.type === 2) sentImage = msg; });
   await left.sendImage(image);
+  assert.equal(sentImage.imageDataUrl, 'data:image/png;base64,AA==');
+  assert.equal(await right.getDecryptedImageUrl(sentImage.id), sentImage.imageDataUrl);
   assert.deepEqual(requests.map((r) => [r.msg_id, r.msg_seq]), [['a', 1], ['b', 1], ['a', 2], ['b', 2]]);
   assert.equal(requests.at(-1).msg_type, 7);
   await Promise.all([left.sendText('parallel left'), right.sendText('parallel right')]);

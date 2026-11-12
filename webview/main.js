@@ -354,7 +354,7 @@
   }
 
   function renderImageContent(div, msg) {
-    if (msg.direction === 'received' && msg.imageDataUrl) {
+    if (msg.imageDataUrl) {
       const img = document.createElement('img');
       img.className = 'message-image';
       img.src = msg.imageDataUrl;

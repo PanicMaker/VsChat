@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/VSCode-%5E1.85.0-blue?logo=visual-studio-code" alt="VSCode Version" />
   <img src="https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/Version-0.9.4-orange" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-0.9.5-orange" alt="Version" />
 </p>
 
 在 VSCode 侧边栏中通过微信或 QQ 直接聊天。微信通道基于腾讯 [OpenClaw iLink 协议](https://github.com/Tencent/openclaw-weixin)，QQ 通道基于官方 [QQ Bot API v2](https://bot.q.qq.com/wiki/develop/api-v2/)。两个通道共用聊天界面，但凭据、连接和历史记录彼此隔离。
@@ -18,6 +18,7 @@
 - 💬 **实时消息收发** — 长轮询接收消息，即时发送文本
 - 🖼️ **图片支持** — 微信使用 AES-128-ECB 媒体链路；QQ 使用官方分片上传接口
 - 在聊天输入框按 **Ctrl+V / ⌘V** 粘贴截图或复制的图片，确认缩略图后按 Enter 或点击发送；点 × 可取消。每次发送一张（最大 10 MB），已有文字保留为草稿。支持 Remote SSH。
+- 自己发出的图片也会显示缩略图，可点击放大；QQ 和微信均会保存发送图片，重载后仍可查看。旧记录若没有保存图片文件，则仍显示占位文字。
 - ↩️ **引用回复** — 微信保留原引用逻辑；QQ 使用 `msg_id` 与 `message_reference`
 - 🔍 **图片预览** — 点击接收的图片在 Lightbox 中全屏查看
 - 💾 **消息持久化** — 基于 SQLite 的本地消息存储，重启后保留历史
