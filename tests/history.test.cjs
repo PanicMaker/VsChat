@@ -52,6 +52,7 @@ function webview() {
       };
     }
     set innerHTML(value) { this.children = []; }
+    removeAttribute(name) { delete this[name]; }
     get scrollHeight() { return this.children.length * 20; }
     appendChild(el) { this.children.push(el); }
     addEventListener(name, callback) { this.events[name] = callback; }
@@ -75,6 +76,9 @@ function webview() {
       querySelectorAll: () => [], addEventListener() {},
     },
     window: { addEventListener: (name, callback) => { events[name] = callback; } },
+    FileReader: class {
+      readAsDataURL(file) { this.result = file.data; this.onload(); }
+    },
     setTimeout, clearTimeout, console,
   });
   return {
@@ -83,6 +87,24 @@ function webview() {
     ids: () => element('messages').children.filter((el) => el.dataset.id).map((el) => el.dataset.id),
   };
 }
+
+test('pasting an image stages bytes until confirmed and preserves the text draft', () => {
+  const ui = webview(), input = ui.element('text-input');
+  input.value = 'draft';
+  const file = { type: 'image/png', size: 3, data: 'data:image/png;base64,YWJj' };
+  const paste = () => input.events.paste({ clipboardData: { files: [file] }, preventDefault() {} });
+  input.events.paste({ clipboardData: { files: [] }, preventDefault() { assert.fail('plain text paste blocked'); } });
+  paste();
+  assert.equal(ui.element('paste-preview').src, file.data);
+  ui.element('paste-cancel').click();
+  assert.equal(ui.element('paste-preview').src, undefined);
+  paste();
+  assert.equal(ui.outbound.filter(m => m.command === 'sendImage').length, 0);
+  ui.element('send-btn').click();
+  assert.equal(ui.outbound.at(-1).imageData, file.data);
+  assert.equal(ui.outbound.at(-1).command, 'sendImage');
+  assert.equal(input.value, 'draft');
+});
 
 test('webview merges live messages, older pages and reconnect snapshots without dropping or duplicating rows', () => {
   const ui = webview();

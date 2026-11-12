@@ -761,3 +761,6 @@ body.mode-git #emoji-btn:hover {
 #load-more-history.hidden {
   display: none;
 }
+#paste-draft:not(.hidden) { display: flex; align-items: center; gap: 6px; flex-basis: 100%; }
+#paste-preview { max-width: 90px; max-height: 64px; object-fit: contain; }
+#input-bar:has(#paste-draft:not(.hidden)) { flex-wrap: wrap; }

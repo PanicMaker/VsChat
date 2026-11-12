@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import { ChatClient } from './chat-client';
 import { ChatDB } from './chat-db';
 import { previewForNotification } from './push';
@@ -111,11 +112,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const safeExtension = /^\.(png|jpe?g|gif|webp|bmp)$/.test(requestedExtension)
           ? requestedExtension
           : '.png';
-        const tempPath = path.join(tempDir, `img_${Date.now()}${safeExtension}`);
+        const tempPath = path.join(tempDir, `img_${randomUUID()}${safeExtension}`);
 
         // Remove data URL prefix and validate size (max 10MB)
         const base64Data = msg.imageData.replace(/^data:image\/\w+;base64,/, '');
-        if (base64Data.length > 10 * 1024 * 1024) {
+        if (Buffer.byteLength(base64Data, 'base64') > 10 * 1024 * 1024) {
           throw new Error('Image too large (max 10MB)');
         }
 
@@ -245,6 +246,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <div id="messages"></div>
         </div>
         <div id="input-bar">
+          <div id="paste-draft" class="hidden">
+            <img id="paste-preview" class="hidden" alt="待发送图片">
+            <span id="paste-status" role="status"></span>
+            <button id="paste-cancel" type="button" aria-label="移除粘贴的图片">×</button>
+          </div>
           <div id="quote-bar" class="hidden">
             <div id="quote-preview"></div>
             <button id="quote-cancel" title="取消引用">&times;</button>

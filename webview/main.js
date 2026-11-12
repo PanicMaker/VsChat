@@ -488,7 +488,58 @@
 
   // ---- Events ----
 
+  const draftBar = document.getElementById('paste-draft');
+  const preview = document.getElementById('paste-preview');
+  const status = document.getElementById('paste-status');
+  let pendingImage = null;
+
+  function clearImageDraft() {
+    pendingImage = null;
+    draftBar.classList.add('hidden');
+    preview.removeAttribute('src');
+    preview.classList.add('hidden');
+  }
+
+  document.getElementById('paste-cancel').addEventListener('click', clearImageDraft);
+  textInput.addEventListener('paste', (event) => {
+    const data = event.clipboardData;
+    const file = Array.from(data?.items || [])
+      .find(item => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile()
+      || Array.from(data?.files || []).find(file => file.type.startsWith('image/'));
+    if (!file) return; // Let the browser paste normal text into the input.
+    event.preventDefault();
+    clearImageDraft();
+    draftBar.classList.remove('hidden');
+    if (!/^image\/(png|jpeg|gif|webp|bmp)$/i.test(file.type) || file.size > 10 * 1024 * 1024) {
+      status.textContent = '请选择不超过 10 MB 的 PNG、JPEG、GIF、WebP 或 BMP 图片';
+      return;
+    }
+    const draft = { fileName: 'clipboard.' + file.type.split('/')[1], imageData: null };
+    pendingImage = draft;
+    status.textContent = '正在读取图片…';
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (pendingImage !== draft) return;
+      draft.imageData = reader.result;
+      preview.src = reader.result;
+      preview.classList.remove('hidden');
+      status.textContent = '待发送图片 · Enter 发送';
+    };
+    reader.onerror = () => {
+      if (pendingImage !== draft) return;
+      pendingImage = null;
+      status.textContent = '图片读取失败，请重新粘贴';
+    };
+    reader.readAsDataURL(file);
+  });
+
   sendBtn.addEventListener('click', () => {
+    if (pendingImage) {
+      if (!pendingImage.imageData) return;
+      vscode.postMessage({ command: 'sendImage', ...pendingImage });
+      clearImageDraft();
+      return; // Keep the text and its quote available as a separate draft.
+    }
     const text = textInput.value.trim();
     if (text) {
       const replyTo = quoteTarget ? {
@@ -506,7 +557,7 @@
   });
 
   textInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendBtn.click();
     }
