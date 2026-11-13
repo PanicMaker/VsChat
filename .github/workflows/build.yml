@@ -2,7 +2,7 @@ name: Build & Package
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, feat/chat-reliability-ui-20261113]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
