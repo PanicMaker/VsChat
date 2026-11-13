@@ -14,11 +14,30 @@ export interface WxMsgItem {
     text?: string;
     transcription?: string;
   };
-  file_item?: { file_name: string; file_size: number; cdn_url: string };
-  video_item?: { aes_key: string; cdn_url: string };
+  file_item?: {
+    file_name?: string;
+    /** Official iLink plaintext byte count, encoded as a decimal string. */
+    len?: string;
+    md5?: string;
+    /** Legacy metadata retained for older locally stored payloads. */
+    file_size?: number;
+    cdn_url?: string;
+    mime_type?: string;
+    media?: { aes_key?: string; full_url?: string; encrypt_query_param?: string; encrypt_type?: number };
+  };
+  video_item?: {
+    aes_key?: string;
+    cdn_url?: string;
+    file_name?: string;
+    file_size?: number;
+    mime_type?: string;
+    media?: { aes_key?: string; full_url?: string; encrypt_query_param?: string };
+  };
   msg_id?: string;
   create_time_ms?: number;
   ref_msg?: WxRefMessage;
+  message_id?: string | number;
+  extra?: { msg_id?: string; ref_msg?: WxRefMessage };
 }
 
 /** Quoted WeChat message in the iLink protocol. */
@@ -35,7 +54,7 @@ export interface ILinkMessage {
   message_state: number;
   context_token: string;
   item_list: WxMsgItem[];
-  message_id?: number;
+  message_id?: number | string;
   // Exact string recovered from raw JSON because i64 exceeds JS safe integers.
   _exactMessageId?: string;
 }
@@ -63,5 +82,13 @@ export interface SendMessageResponse {
   ret?: number;
   errcode?: number;
   errmsg?: string;
-  message_id?: number;
+  message_id?: number | string;
+}
+
+/** Upload parameters returned by the authenticated iLink Bot API. */
+export interface GetUploadUrlResponse {
+  upload_full_url?: string;
+  upload_param?: string;
+  ret?: number;
+  errcode?: number;
 }

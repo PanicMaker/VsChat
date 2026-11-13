@@ -1,12 +1,16 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { isIP } from 'net';
 import * as vscode from 'vscode';
 import { fetch, ProxyAgent, RequestInit, WebSocket } from 'undici';
 import { ChatDB } from './chat-db';
-import { ChatMessage, MsgType, MsgTypeValue, ReplyTo } from './types';
+import { persistImageCache } from './image-cache';
+import { ChatMessage, ChatMessagePart, ConnectionHealth, MsgType, MsgTypeValue, ReplyTo } from './types';
 import * as log from './logger';
 import { parseQqContent } from './qq-content';
+import { FileSendError, MAX_FILE_BYTES, sanitizeFileName, getFileDownloadSpec, downloadFileBytes } from './file-transfer';
+import { RecipientState, SendTarget, recipientId } from './recipient-types';
 
 const API_BASE_URL = 'https://api.bot.qq.com';
 const ACCESS_TOKEN_URL = `${API_BASE_URL}/app/getAppAccessToken`;
@@ -16,6 +20,40 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
 const MD5_10M_BYTES = 10_002_432;
 const C2C_PASSIVE_REPLY_WINDOW_SECONDS = 60 * 60;
 const C2C_MAX_PASSIVE_REPLIES = 4;
+const FILE_REQUEST_TIMEOUT_MS = 30_000;
+const GATEWAY_CONNECT_TIMEOUT_MS = 30_000;
+const GATEWAY_DISPATCH_TIMEOUT_MS = 30_000;
+const GATEWAY_MAX_QUEUED_EVENTS = 256;
+const GATEWAY_MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const GATEWAY_MAX_PAYLOAD_BYTES = 1024 * 1024;
+
+interface GatewayCheckpoint { sessionId: string; sequence: number; credentialKey: string }
+interface QueuedDispatch {
+  payload: GatewayPayload;
+  bytes: number;
+  resolve(): void;
+  reject(error: Error): void;
+}
+interface GatewayConnection {
+  generation: number;
+  controller: AbortController;
+  socket: InstanceType<typeof WebSocket>;
+  closed: boolean;
+  helloStarted: boolean;
+  accountId: string;
+  credentialKey: string;
+  sessionId: string;
+  sequence: number | null;
+  receivedSequence: number | null;
+  heartbeatInterval: number;
+  heartbeatTimer?: NodeJS.Timeout;
+  ackTimer?: NodeJS.Timeout;
+  readyTimer?: NodeJS.Timeout;
+  awaitingAck: boolean;
+  queue: QueuedDispatch[];
+  queuedBytes: number;
+  processing: boolean;
+}
 
 export const QQ_APP_ID_SECRET = 'vschat_qq_app_id';
 export const QQ_APP_SECRET_SECRET = 'vschat_qq_app_secret';
@@ -45,6 +83,25 @@ interface QqAttachment {
   content_type?: string;
   voice_wav_url?: string;
   asr_refer_text?: string;
+  size?: number;
+}
+
+function imageCacheKey(messageId: number, partIndex?: number): string {
+  if (!Number.isSafeInteger(messageId) || messageId < 1
+      || (partIndex !== undefined && (!Number.isSafeInteger(partIndex) || partIndex < 0))) {
+    throw new Error('Invalid image cache identifier');
+  }
+  return partIndex === undefined ? String(messageId) : `${messageId}.part-${partIndex}`;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function partSummary(part: ChatMessagePart): string {
+  if (part.type === MsgType.Text) return part.text || '';
+  const label = { 2: '图片', 3: '语音消息', 4: '文件', 5: '视频' }[part.type];
+  return [part.text, `[${label}${part.fileName ? `：${part.fileName}` : ''}]`].filter(Boolean).join(' ');
 }
 
 interface QqC2CMessage {
@@ -94,11 +151,12 @@ class QqBotError extends Error {
 /** QQ Bot API v2 transport (C2C / single-user chat). */
 export class QqBotClient extends vscode.Disposable {
   readonly channelName = 'QQ';
+  readonly fileCapabilities = { canSend: true, maxBytes: MAX_FILE_BYTES };
 
   private accessToken = '';
   private accessTokenExpiresAt = 0;
+  private accessTokenCredentialKey = '';
   private socket: InstanceType<typeof WebSocket> | null = null;
-  private heartbeatTimer: NodeJS.Timeout | undefined;
   private reconnectTimer: NodeJS.Timeout | undefined;
   private reconnectDelay = 1_000;
   private shouldRun = false;
@@ -106,6 +164,20 @@ export class QqBotClient extends vscode.Disposable {
   private _connected = false;
   private sequence: number | null = null;
   private sessionId = '';
+  private gatewayAccountId = '';
+  private gatewayCredentialKey = '';
+  private gatewayGeneration = 0;
+  private activeGateway: GatewayConnection | undefined;
+  private connectController: AbortController | undefined;
+  private resumeCheckpoint: GatewayCheckpoint | undefined;
+  private forceIdentify = false;
+  private pendingDispatchWork: Promise<void> | undefined;
+  private disposed = false;
+  private _connectionHealth: ConnectionHealth = { state: 'offline', detail: 'QQ Bot 未连接' };
+
+  private _onConnectionHealth = new vscode.EventEmitter<ConnectionHealth>();
+  readonly onConnectionHealth = this._onConnectionHealth.event;
+  get connectionHealth(): ConnectionHealth { return { ...this._connectionHealth }; }
 
   private _onMessage = new vscode.EventEmitter<ChatMessage>();
   readonly onMessage = this._onMessage.event;
@@ -155,223 +227,289 @@ export class QqBotClient extends vscode.Disposable {
   }
 
   async startPolling(): Promise<void> {
-    if (this.shouldRun) {
-      log.debug('[QQ Gateway] start ignored; client already running');
-      return;
-    }
+    if (this.shouldRun || this.disposed) return;
     this.shouldRun = true;
     this.reconnectDelay = 1_000;
-    log.info('[QQ Gateway] starting connection loop');
+    this.setHealth('connecting', '正在连接 QQ Gateway…');
     await this.connectGateway();
   }
 
   stopPolling(): void {
-    log.info('[QQ Gateway] stopping connection', {
-      connected: this._connected,
-      socketState: this.socket?.readyState,
-      sequence: this.sequence,
-    });
     this.shouldRun = false;
-    this._connected = false;
-    this.clearHeartbeat();
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.gatewayGeneration++;
+    this.connectController?.abort();
+    this.connectController = undefined;
+    this.connecting = false;
+    if (this.reconnectTimer) this.cancelTimer(this.reconnectTimer);
     this.reconnectTimer = undefined;
-    const socket = this.socket;
-    this.socket = null;
-    if (socket && socket.readyState < WebSocket.CLOSING) {
-      socket.close(1000, 'client disconnect');
-    }
+    if (this.activeGateway) this.detachGateway(this.activeGateway, 'client disconnect');
+    this._connected = false;
+    this.setHealth('offline', 'QQ Bot 已断开');
+  }
+
+  private now(): number { return Date.now(); }
+  private after(ms: number, callback: () => void): NodeJS.Timeout { return setTimeout(callback, ms); }
+  private cancelTimer(timer: NodeJS.Timeout): void { clearTimeout(timer); }
+
+  private setHealth(state: ConnectionHealth['state'], detail: string, retryAt?: number): void {
+    this._connectionHealth = { state, detail, ...(this._connectionHealth.lastAckAt === undefined ? {} : {
+      lastAckAt: this._connectionHealth.lastAckAt,
+    }), ...(retryAt === undefined ? {} : { retryAt }) };
+    this._onConnectionHealth.fire(this.connectionHealth);
+    this.emitStatus(detail);
+  }
+
+  private isCurrent(connection: GatewayConnection): boolean {
+    return !this.disposed && this.shouldRun && !connection.closed
+      && this.activeGateway === connection && connection.generation === this.gatewayGeneration;
+  }
+
+  private createGatewaySocket(url: string): InstanceType<typeof WebSocket> {
+    const agent = this.getProxyAgent();
+    return new WebSocket(url, {
+      ...(agent ? { dispatcher: agent } : {}),
+      headers: { 'User-Agent': 'VsChat/0.9.5' },
+    });
   }
 
   private async connectGateway(): Promise<void> {
-    if (!this.shouldRun || this.connecting) {
-      log.debug('[QQ Gateway] connect skipped', { shouldRun: this.shouldRun, connecting: this.connecting });
+    if (!this.shouldRun || this.disposed || this.connecting || this.activeGateway) return;
+    // An uncooperative old DB handler cannot be cancelled midway through an
+    // atomic save. Keep at most one such handler; reconnect once it settles.
+    if (this.pendingDispatchWork) {
+      this.setHealth('reconnecting', 'QQ 已断开，等待上一条消息处理完成后重连…');
       return;
     }
     this.connecting = true;
-    const operationId = log.nextId('qq-gw');
-    const startedAt = Date.now();
-    log.info('[QQ Gateway] resolving gateway', { operationId, resumeAvailable: Boolean(this.sessionId) });
-
+    const generation = ++this.gatewayGeneration;
+    const controller = new AbortController();
+    this.connectController = controller;
+    const deadline = this.after(GATEWAY_CONNECT_TIMEOUT_MS, () => controller.abort());
+    this.setHealth(this._connectionHealth.state === 'reconnecting' ? 'reconnecting' : 'connecting', '正在连接 QQ Gateway…');
     try {
-      const gateway = await this.requestApi<GatewayResponse>('/gateway');
-      if (!gateway.url) throw new Error('QQ Gateway 未返回 WebSocket 地址');
-
-      this.emitStatus('正在连接 QQ Gateway…');
-      const agent = this.getProxyAgent();
-      log.info('[QQ Gateway] opening WebSocket', {
-        operationId,
-        host: log.describeUrl(gateway.url),
-        proxy: Boolean(agent),
-      });
-      const socket = new WebSocket(gateway.url, {
-        ...(agent ? { dispatcher: agent } : {}),
-        headers: { 'User-Agent': 'VsChat/0.9.5' },
-      });
+      const gateway = await this.requestApi<GatewayResponse>('/gateway', { signal: controller.signal });
+      if (!this.shouldRun || this.disposed || generation !== this.gatewayGeneration) return;
+      if (controller.signal.aborted) throw new Error('QQ Gateway 连接超时');
+      if (!gateway.url || new URL(gateway.url).protocol !== 'wss:') throw new Error('QQ Gateway 未返回有效 WSS 地址');
+      const socket = this.createGatewaySocket(gateway.url);
+      socket.binaryType = 'arraybuffer';
+      const connection: GatewayConnection = {
+        generation, controller, socket, closed: false, helloStarted: false,
+        accountId: '', credentialKey: '', sessionId: '', sequence: null, receivedSequence: null,
+        heartbeatInterval: 0, awaitingAck: false, queue: [], queuedBytes: 0, processing: false,
+      };
       this.socket = socket;
-
-      socket.addEventListener('message', (event) => {
-        void this.handleGatewayMessage(event.data).catch((err: Error) => {
-          log.error('[QQ Gateway] message processing failed', { operationId }, log.formatError(err));
-          this.emitStatus(`QQ 消息处理失败：${err.message}`);
+      this.activeGateway = connection;
+      connection.readyTimer = this.after(GATEWAY_CONNECT_TIMEOUT_MS, () => {
+        this.failGateway(connection, 'QQ Gateway 握手超时');
+      });
+      socket.addEventListener('message', event => {
+        if (!this.isCurrent(connection)) return;
+        void this.handleGatewayMessage(event.data, connection).catch(error => {
+          this.failGateway(connection, 'QQ 消息处理失败', error);
         });
       });
-
-      socket.addEventListener('error', (event: any) => {
-        log.error('[QQ Gateway] socket error', { operationId, message: event?.message || 'unknown error' });
-      });
-
+      socket.addEventListener('error', () => this.failGateway(connection, 'QQ Gateway 连接异常'));
       socket.addEventListener('close', (event: any) => {
-        if (this.socket === socket) this.socket = null;
-        this.clearHeartbeat();
-        this._connected = false;
-        this.handleGatewayClose(Number(event.code || 0), String(event.reason || ''));
+        if (!this.isCurrent(connection)) return;
+        this.detachGateway(connection, 'server close', false);
+        void this.handleGatewayClose(Number(event.code || 0), connection).catch(error => {
+          log.error('[QQ Gateway] close handling failed', log.formatError(error));
+          if (generation === this.gatewayGeneration) this.scheduleReconnect('QQ 会话恢复信息保存失败');
+        });
       });
-    } catch (err: any) {
-      log.error('[QQ Gateway] connection attempt failed', {
-        operationId,
-        durationMs: Date.now() - startedAt,
-        retryable: !(err instanceof QqBotError) || err.retryable,
-      }, log.formatError(err));
-      this.emitStatus(`QQ 连接失败：${err.message}`);
-      if (err instanceof QqBotError && !err.retryable) {
+    } catch (error) {
+      if (!this.shouldRun || this.disposed || generation !== this.gatewayGeneration) return;
+      log.error('[QQ Gateway] connection attempt failed', log.formatError(error));
+      if (error instanceof QqBotError && !error.retryable) {
         this.shouldRun = false;
-        return;
-      }
-      this.scheduleReconnect();
+        this.setHealth('error', 'QQ Gateway 拒绝连接，请检查机器人凭据与权限后重新连接');
+      } else this.scheduleReconnect(controller.signal.aborted ? 'QQ Gateway 连接超时' : 'QQ Gateway 连接失败');
     } finally {
-      this.connecting = false;
+      this.cancelTimer(deadline);
+      if (generation === this.gatewayGeneration) {
+        this.connecting = false;
+        this.connectController = undefined;
+      }
     }
   }
 
-  private async handleGatewayMessage(raw: unknown): Promise<void> {
-    const text = typeof raw === 'string'
-      ? raw
-      : raw instanceof ArrayBuffer
-        ? Buffer.from(raw).toString('utf8')
-        : String(raw);
+  private async handleGatewayMessage(raw: unknown, connection = this.activeGateway): Promise<void> {
+    if (!connection || !this.isCurrent(connection)) return;
+    const text = typeof raw === 'string' ? raw
+      : raw instanceof ArrayBuffer ? Buffer.from(raw).toString('utf8')
+        : ArrayBuffer.isView(raw) ? Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('utf8') : '';
+    const bytes = Buffer.byteLength(text);
+    if (!bytes || bytes > GATEWAY_MAX_PAYLOAD_BYTES) throw new Error('Invalid QQ Gateway payload size');
     const payload = JSON.parse(text) as GatewayPayload;
-    log.debug('[QQ Gateway] payload received', {
-      op: payload.op,
-      event: payload.t,
-      sequence: payload.s,
-      bytes: Buffer.byteLength(text),
-    });
-    if (typeof payload.s === 'number') {
-      this.sequence = payload.s;
-    }
-
+    if (!payload || !Number.isSafeInteger(payload.op)) throw new Error('Invalid QQ Gateway opcode');
+    log.debug('[QQ Gateway] payload received', { op: payload.op, event: payload.t, sequence: payload.s, bytes });
+    // Control frames never join the dispatch queue: a slow DB write must not
+    // block ACKs, heartbeat requests, or a server-requested reconnect.
     switch (payload.op) {
       case 0:
-        await this.handleDispatch(payload);
-        break;
+        if (!Number.isSafeInteger(payload.s) || payload.s! < 0) throw new Error('Invalid QQ dispatch sequence');
+        connection.receivedSequence = Math.max(connection.receivedSequence ?? 0, payload.s!);
+        return this.enqueueDispatch(connection, payload, bytes);
       case 1:
-        log.debug('[QQ Gateway] server requested heartbeat', { sequence: this.sequence });
-        this.sendGateway({ op: 1, d: this.sequence });
-        break;
+        this.sendHeartbeat(connection, true);
+        return;
       case 7:
-        log.warn('[QQ Gateway] reconnect requested by server', { sequence: this.sequence });
-        this.emitStatus('QQ Gateway 要求重新连接…');
-        this.socket?.close(4009, 'server requested reconnect');
-        break;
+        this.failGateway(connection, 'QQ Gateway 要求重新连接');
+        return;
       case 9:
-        log.warn('[QQ Gateway] invalid session', { resumable: Boolean(payload.d), sequence: this.sequence });
-        if (!payload.d) await this.clearSession();
-        this.emitStatus(payload.d
-          ? 'QQ Gateway 会话暂时失效，正在恢复…'
-          : 'QQ Gateway 会话失效，正在重新鉴权…');
-        this.socket?.close(payload.d ? 4009 : 4006, 'invalid session');
-        break;
+        this.detachGateway(connection, 'invalid session');
+        if (!payload.d) await this.clearSession(connection.sessionId);
+        if (connection.generation === this.gatewayGeneration) this.scheduleReconnect(payload.d ? 'QQ 会话暂时失效' : 'QQ 会话失效，将重新鉴权');
+        return;
       case 10:
-        await this.handleHello(payload.d?.heartbeat_interval);
-        break;
+        if (connection.helloStarted) throw new Error('Duplicate QQ Gateway hello');
+        connection.helloStarted = true;
+        await this.handleHello(payload.d?.heartbeat_interval, connection);
+        return;
       case 11:
-        log.debug('[QQ Gateway] heartbeat acknowledged', { sequence: this.sequence });
-        break;
-      default:
-        log.debug('[QQ Gateway] unhandled opcode', { op: payload.op });
-    }
-
-    // Persist the resume cursor only after the event was processed successfully;
-    // otherwise a crash during processing could permanently skip that event.
-    if (typeof payload.s === 'number') {
-      await this.db.setMetadata('qq_gateway_seq', String(payload.s));
+        if (!connection.awaitingAck) return;
+        connection.awaitingAck = false;
+        if (connection.ackTimer) this.cancelTimer(connection.ackTimer);
+        connection.ackTimer = undefined;
+        if (this._connected) this.reconnectDelay = 1_000;
+        this._connectionHealth = { ...this._connectionHealth, lastAckAt: this.now() };
+        this._onConnectionHealth.fire(this.connectionHealth);
+        return;
     }
   }
 
-  private async handleHello(intervalValue: unknown): Promise<void> {
+  private async handleHello(intervalValue: unknown, connection = this.activeGateway): Promise<void> {
+    if (!connection || !this.isCurrent(connection)) return;
     const interval = Number(intervalValue);
-    if (!Number.isFinite(interval) || interval <= 0) {
+    if (!Number.isSafeInteger(interval) || interval < 100 || interval > 300_000) {
       throw new Error('QQ Gateway 返回了无效心跳周期');
     }
-
-    this.clearHeartbeat();
-    log.info('[QQ Gateway] hello received', {
-      heartbeatIntervalMs: interval,
-      scheduledIntervalMs: Math.floor(interval * 0.8),
-    });
-    this.heartbeatTimer = setInterval(() => {
-      log.debug('[QQ Gateway] heartbeat sent', { sequence: this.sequence });
-      this.sendGateway({ op: 1, d: this.sequence });
-    }, Math.floor(interval * 0.8));
-
-    const token = `QQBot ${await this.getAccessToken()}`;
-    this.sessionId = (await this.db.getMetadata('qq_gateway_session_id')) || '';
-    const storedSeq = Number(await this.db.getMetadata('qq_gateway_seq'));
-    if (this.sessionId && Number.isFinite(storedSeq)) {
-      log.info('[QQ Gateway] resuming session', { sessionId: this.sessionId, sequence: storedSeq });
-      this.sequence = storedSeq;
-      this.sendGateway({
-        op: 6,
-        d: { token, session_id: this.sessionId, seq: storedSeq },
-      });
+    connection.heartbeatInterval = interval;
+    this.armHeartbeat(connection);
+    const token = `QQBot ${await this.getAccessToken(false, connection.controller.signal)}`;
+    const credentials = await this.getCredentials();
+    const credentialKey = this.credentialKey(credentials);
+    if (credentialKey !== this.accessTokenCredentialKey) throw new Error('QQ Bot 凭据已变化，请重新连接');
+    const saved = this.forceIdentify ? undefined : this.resumeCheckpoint || await this.db.getQqGatewayCheckpoint();
+    if (!this.isCurrent(connection)) return;
+    connection.accountId = credentials.appId;
+    connection.credentialKey = credentialKey;
+    this.gatewayAccountId = credentials.appId;
+    this.gatewayCredentialKey = credentialKey;
+    if (saved && saved.credentialKey === credentialKey) {
+      connection.sessionId = saved.sessionId;
+      connection.sequence = saved.sequence;
+      connection.receivedSequence = saved.sequence;
+      this.sendGateway({ op: 6, d: { token, session_id: saved.sessionId, seq: saved.sequence } }, connection);
     } else {
-      log.info('[QQ Gateway] identifying new session', { intents: GROUP_AND_C2C_EVENT, shard: '0/1' });
-      this.sendGateway({
-        op: 2,
-        d: {
-          token,
-          intents: GROUP_AND_C2C_EVENT,
-          shard: [0, 1],
-          properties: {
-            '$os': process.platform,
-            '$browser': 'vschat',
-            '$device': 'vscode',
-          },
-        },
+      this.sendGateway({ op: 2, d: {
+        token, intents: GROUP_AND_C2C_EVENT, shard: [0, 1],
+        properties: { '$os': process.platform, '$browser': 'vschat', '$device': 'vscode' },
+      } }, connection);
+    }
+  }
+
+  private armHeartbeat(connection: GatewayConnection): void {
+    connection.heartbeatTimer = this.after(connection.heartbeatInterval, () => {
+      if (!this.isCurrent(connection)) return;
+      this.sendHeartbeat(connection);
+      if (this.isCurrent(connection)) this.armHeartbeat(connection);
+    });
+  }
+
+  private sendHeartbeat(connection: GatewayConnection, requested = false): void {
+    if (!this.isCurrent(connection)) return;
+    // An extra server request does not extend the oldest unanswered heartbeat.
+    if (connection.awaitingAck && !requested) return;
+    if (!this.sendGateway({ op: 1, d: connection.receivedSequence }, connection)) return;
+    if (!connection.awaitingAck) {
+      connection.awaitingAck = true;
+      connection.ackTimer = this.after(connection.heartbeatInterval || GATEWAY_CONNECT_TIMEOUT_MS, () => {
+        if (this.isCurrent(connection) && connection.awaitingAck) this.failGateway(connection, 'QQ 心跳确认超时');
       });
     }
   }
 
-  private async handleDispatch(payload: GatewayPayload): Promise<void> {
-    if (payload.t === 'READY') {
-      this.sessionId = String(payload.d?.session_id || '');
-      if (this.sessionId) {
-        await this.db.setMetadata('qq_gateway_session_id', this.sessionId);
+  private enqueueDispatch(connection: GatewayConnection, payload: GatewayPayload, bytes: number): Promise<void> {
+    if (connection.sequence !== null && payload.s! <= connection.sequence) return Promise.resolve();
+    if (connection.queue.length + Number(connection.processing) >= GATEWAY_MAX_QUEUED_EVENTS
+        || connection.queuedBytes + bytes > GATEWAY_MAX_QUEUED_BYTES) {
+      this.failGateway(connection, 'QQ 消息积压超过上限，将从已保存位置恢复');
+      return Promise.reject(new Error('QQ dispatch queue limit exceeded'));
+    }
+    return new Promise((resolve, reject) => {
+      connection.queue.push({ payload, bytes, resolve, reject });
+      connection.queuedBytes += bytes;
+      if (!connection.processing) void this.drainDispatch(connection);
+    });
+  }
+
+  private async drainDispatch(connection: GatewayConnection): Promise<void> {
+    connection.processing = true;
+    while (this.isCurrent(connection) && connection.queue.length) {
+      const item = connection.queue.shift()!;
+      let deadline: NodeJS.Timeout | undefined;
+      let cancel: (() => void) | undefined;
+      const work = this.handleDispatch(item.payload, connection);
+      this.pendingDispatchWork = work;
+      // Observe settlement even if a timeout detaches this connection. Only one
+      // physical handler may survive cancellation; its checkpoint is fenced.
+      void work.catch(() => {}).finally(() => {
+        if (this.pendingDispatchWork === work) this.pendingDispatchWork = undefined;
+        if (this.shouldRun && !this.activeGateway && !this.connecting) this.scheduleReconnect('QQ 消息处理已结束，准备恢复连接');
+      });
+      try {
+        await Promise.race([work, new Promise<never>((_, reject) => {
+          cancel = () => reject(new Error('QQ dispatch cancelled with its connection'));
+          if (connection.controller.signal.aborted) cancel();
+          else connection.controller.signal.addEventListener('abort', cancel, { once: true });
+          deadline = this.after(GATEWAY_DISPATCH_TIMEOUT_MS, () => reject(new Error('QQ dispatch processing timed out')));
+        })]);
+        item.resolve();
+      } catch (error) {
+        item.reject(error instanceof Error ? error : new Error(String(error)));
+        this.failGateway(connection, 'QQ 消息处理失败或超时，将从已保存位置恢复', error);
+      } finally {
+        if (deadline) this.cancelTimer(deadline);
+        if (cancel) connection.controller.signal.removeEventListener('abort', cancel);
+        connection.queuedBytes -= item.bytes;
       }
-      this.reconnectDelay = 1_000;
-      this._connected = true;
-      log.info('[QQ Gateway] ready', { sessionId: this.sessionId, sequence: this.sequence });
-      this.emitStatus('QQ Bot 已连接');
-      this._onLoginSuccess.fire();
-      return;
     }
+    connection.processing = false;
+  }
 
-    if (payload.t === 'RESUMED') {
-      this.reconnectDelay = 1_000;
-      this._connected = true;
-      log.info('[QQ Gateway] session resumed', { sessionId: this.sessionId, sequence: this.sequence });
-      this.emitStatus('QQ Bot 连接已恢复');
-      this._onLoginSuccess.fire();
-      return;
+  private async handleDispatch(payload: GatewayPayload, connection: GatewayConnection): Promise<void> {
+    if (!this.isCurrent(connection)) return;
+    if (connection.sequence !== null && payload.s! <= connection.sequence) return;
+    let sessionId = connection.sessionId;
+    if (payload.t === 'READY') {
+      sessionId = typeof payload.d?.session_id === 'string' ? payload.d.session_id : '';
+      if (!sessionId) throw new Error('QQ READY 未返回 session_id');
+    } else if (payload.t === 'C2C_MESSAGE_CREATE') {
+      await this.processC2CMessage(payload.d as QqC2CMessage, connection.accountId, () => this.isCurrent(connection));
     }
-
-    if (payload.t === 'C2C_MESSAGE_CREATE') {
-      await this.processC2CMessage(payload.d as QqC2CMessage);
+    if (!this.isCurrent(connection)) return;
+    if (!sessionId || !connection.credentialKey) throw new Error('QQ Gateway 尚未建立会话身份');
+    const checkpoint = { sessionId, sequence: payload.s!, credentialKey: connection.credentialKey };
+    await this.db.saveQqGatewayCheckpoint(checkpoint);
+    if (!this.isCurrent(connection)) return;
+    connection.sessionId = sessionId;
+    connection.sequence = checkpoint.sequence;
+    this.sessionId = sessionId;
+    this.sequence = checkpoint.sequence;
+    this.resumeCheckpoint = checkpoint;
+    this.forceIdentify = false;
+    if (payload.t === 'READY' || payload.t === 'RESUMED') {
+      if (connection.readyTimer) this.cancelTimer(connection.readyTimer);
+      connection.readyTimer = undefined;
+      this._connected = true;
+      this.setHealth('online', payload.t === 'READY' ? 'QQ Bot 已连接' : 'QQ Bot 连接已恢复');
+      this._onLoginSuccess.fire();
     }
   }
 
-  private async processC2CMessage(message: QqC2CMessage): Promise<void> {
+  private async processC2CMessage(message: QqC2CMessage, authenticatedAccount?: string, stillCurrent?: () => boolean): Promise<void> {
     if (!message?.id) {
       log.warn('[QQ Receive] ignored event without message ID');
       return;
@@ -381,39 +519,57 @@ export class QqBotClient extends vscode.Disposable {
       log.warn('[QQ Receive] message skipped; user_openid missing', { messageId: message.id });
       return;
     }
+    // Incoming identity belongs to the authenticated socket, not credentials
+    // that the user might have edited while that socket is still connected.
+    const accountId = authenticatedAccount || this.gatewayAccountId || await this.getAppId();
 
-    const attachment = message.attachments?.[0];
-    const contentType = attachment?.content_type || '';
-    const parsedContent = parseQqContent(message.content || '');
-    let type: MsgTypeValue = MsgType.Text;
-    let content = parsedContent.text;
-    let imageDataUrl: string | undefined;
+    const parsedContent = parseQqContent(optionalString(message.content) || '');
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments.filter(attachment => attachment && typeof attachment === 'object' && !Array.isArray(attachment))
+      : [];
+    const parts: ChatMessagePart[] = [];
+    if (parsedContent.text) parts.push({ type: MsgType.Text, text: parsedContent.text });
+    for (const attachment of attachments) {
+      const contentType = optionalString(attachment.content_type) || '';
+      const voiceUrl = optionalString(attachment.voice_wav_url);
+      const type = contentType.startsWith('image/') ? MsgType.Image
+        : contentType === 'voice' || contentType.startsWith('audio/') || voiceUrl ? MsgType.Voice
+          : contentType.startsWith('video/') ? MsgType.Video : MsgType.File;
+      parts.push({
+        type,
+        url: type === MsgType.Voice ? voiceUrl || optionalString(attachment.url) : optionalString(attachment.url),
+        text: type === MsgType.Voice ? optionalString(attachment.asr_refer_text) : undefined,
+        fileName: optionalString(attachment.filename),
+        size: typeof attachment.size === 'number' && Number.isFinite(attachment.size) && attachment.size >= 0 ? attachment.size : undefined,
+        mimeType: contentType || undefined,
+      });
+    }
+    if (!parts.length) {
+      parts.push({ type: MsgType.Text, text: message.message_type === 3 ? '[卡片消息]' : '[QQ 消息]' });
+    }
+    // Single-part fields remain compatible with legacy consumers; multipart
+    // content is a readable search/notification summary of the complete envelope.
+    const onlyPart = parts.length === 1 ? parts[0] : undefined;
+    const type: MsgTypeValue = onlyPart?.type || MsgType.Text;
+    const content = onlyPart
+      ? onlyPart.type === MsgType.Image ? onlyPart.url || '[图片]'
+        : onlyPart.type === MsgType.Voice ? onlyPart.text || '[语音消息]'
+          : onlyPart.type === MsgType.File ? onlyPart.url || onlyPart.fileName || '[文件]'
+            : onlyPart.type === MsgType.Text ? onlyPart.text || '' : partSummary(onlyPart)
+      : parts.map(partSummary).join('\n');
+    const imageDataUrl = onlyPart?.type === MsgType.Image ? onlyPart.url : undefined;
     log.info('[QQ Receive] C2C message', {
       messageId: message.id,
       openId,
       messageType: message.message_type,
       contentLength: message.content?.length || 0,
-      attachmentCount: message.attachments?.length || 0,
-      attachmentType: contentType || undefined,
+      attachmentCount: attachments.length,
+      attachmentType: optionalString(attachments[0]?.content_type),
       hasQuote: Boolean(message.message_scene?.ext?.some((value) => value.startsWith('ref_msg_idx='))),
       faceCount: parsedContent.faceCount,
       faceFallbackCount: parsedContent.fallbackCount,
       timestamp: message.timestamp,
     });
-
-    if (attachment && contentType.startsWith('image/')) {
-      type = MsgType.Image;
-      content = attachment.url || '[图片]';
-      imageDataUrl = attachment.url;
-    } else if (attachment && (contentType === 'voice' || attachment.voice_wav_url)) {
-      type = MsgType.Voice;
-      content = attachment.asr_refer_text || '[语音消息]';
-    } else if (attachment) {
-      type = MsgType.File;
-      content = attachment.url || attachment.filename || '[文件]';
-    } else if (!content) {
-      content = message.message_type === 3 ? '[卡片消息]' : '[QQ 消息]';
-    }
 
     const ext = message.message_scene?.ext || [];
     const referenceId = this.extValue(ext, 'msg_idx');
@@ -433,16 +589,19 @@ export class QqBotClient extends vscode.Disposable {
       direction: 'received',
       type,
       content,
+      parts,
       timestamp: Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : Math.floor(Date.now() / 1000),
       context_token: '',
       from_user_id: openId,
-      to_user_id: await this.getAppId(),
+      to_user_id: accountId,
       message_id: message.id,
       reference_id: referenceId || undefined,
       reply_to: replyTo,
     };
 
+    if (stillCurrent && !stillCurrent()) return;
     const { id, inserted, latestAdvanced } = await this.db.storeQqInbound(chatMessage);
+    if (stillCurrent && !stillCurrent()) return;
     if (!inserted) {
       log.info('[QQ Receive] duplicate event already persisted; routing unchanged', {
         dbId: id,
@@ -456,9 +615,89 @@ export class QqBotClient extends vscode.Disposable {
     this._onMessage.fire({ ...chatMessage, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
   }
 
-  async sendText(text: string, replyTo?: ReplyTo): Promise<string | undefined> {
+  async getRecipients(): Promise<RecipientState> {
+    let accountId: string;
+    try { accountId = await this.getAppId(); }
+    catch { return { recipients: [], reason: '请先配置 QQ Bot 凭据' }; }
+    const { conversations, totalUnreadCount } = await this.db.getQqRecipientSummary({
+      appId: accountId, nowSeconds: Math.floor(Date.now() / 1000),
+      windowSeconds: C2C_PASSIVE_REPLY_WINDOW_SECONDS, maxReplies: C2C_MAX_PASSIVE_REPLIES,
+    });
+    const configured = (vscode.workspace.getConfiguration('vschat').get<string>('qqUserOpenId') || '').trim();
+    const peers = new Map(conversations.map(item => [item.conversation.peerId, item]));
+    if (configured && !peers.has(configured)) {
+      peers.set(configured, { conversation: { accountId, peerId: configured }, lastTimestamp: 0, unreadCount: 0, hasLiveInbound: false, replyContext: null });
+    }
+    const recipients = [...peers.values()].map(item => {
+      const conversation = { accountId, peerId: item.conversation.peerId };
+      const canSend = this._connected && Boolean(item.replyContext);
+      return {
+        id: recipientId(conversation), conversation,
+        label: `QQ · ${conversation.peerId}${configured === conversation.peerId ? '（配置）' : ''}`,
+        canSend, unreadCount: item.unreadCount,
+        reason: canSend ? undefined : !this._connected ? 'QQ Bot 尚未连接'
+          : '暂无可用被动回复额度，请让此联系人给机器人发送一条新消息',
+      };
+    });
+    return { accountId, recipients, totalUnreadCount, reason: recipients.length ? undefined : '请先在 QQ 中给机器人发送一条消息' };
+  }
+
+  async captureSendTarget(id: string): Promise<SendTarget> {
+    const state = await this.getRecipients();
+    const selected = state.recipients.find(item => item.id === id);
+    if (!selected?.conversation || !selected.canSend) {
+      throw new FileSendError(selected?.reason || '请选择当前 QQ Bot 的有效收件人');
+    }
+    const credentials = await this.getCredentials();
+    if (credentials.appId !== selected.conversation.accountId) throw new FileSendError('QQ Bot 账号已变化，请重新选择收件人');
+    return Object.freeze({ ...selected.conversation, channel: 'qq', sessionKey: this.credentialKey(credentials) });
+  }
+
+  private async freezeSendTarget(target?: SendTarget): Promise<SendTarget> {
+    // Copy before the first await: callers cannot redirect an in-flight operation.
+    const frozen = target && Object.freeze({ ...target });
+    if (frozen) {
+      if (frozen.channel !== 'qq' || typeof frozen.accountId !== 'string' || !frozen.accountId
+          || typeof frozen.peerId !== 'string' || !frozen.peerId
+          || typeof frozen.sessionKey !== 'string' || !/^[a-f0-9]{64}$/.test(frozen.sessionKey)) {
+        throw new FileSendError('QQ 收件人快照无效，请重新选择收件人');
+      }
+      await this.assertTargetAccount(frozen);
+      if (!await this.db.peekQqReply(this.replyOptions(frozen.accountId, frozen.peerId))) {
+        throw new FileSendError('此 QQ 联系人的被动回复额度已用尽或过期，请等待对方的新消息');
+      }
+      return frozen;
+    }
+    // Legacy direct callers retain automatic routing. The production provider
+    // always supplies a captured target; even legacy calls resolve it only once.
+    const accountId = await this.getAppId();
+    const peerId = await this.getTargetOpenId();
+    return Object.freeze({ channel: 'qq', accountId, peerId });
+  }
+
+  private credentialKey(credentials: { appId: string; appSecret: string }): string {
+    return crypto.createHash('sha256').update(JSON.stringify([credentials.appId, credentials.appSecret])).digest('hex');
+  }
+
+  private async assertTargetAccount(target?: SendTarget): Promise<void> {
+    if (!target) return;
+    if (!this._connected) throw new FileSendError('QQ Bot 已断开，请重新连接后发送');
+    if (target.sessionKey) {
+      let credentials: { appId: string; appSecret: string };
+      try { credentials = await this.getCredentials(); }
+      catch { throw new FileSendError('QQ Bot 凭据已移除，请重新配置后选择收件人'); }
+      if (credentials.appId !== target.accountId || this.credentialKey(credentials) !== target.sessionKey) {
+        throw new FileSendError('QQ Bot 凭据已变化，请重新选择收件人');
+      }
+    } else if (await this.getAppId() !== target.accountId) {
+      throw new FileSendError('QQ Bot 账号已变化，请重新选择收件人');
+    }
+  }
+
+  async sendText(text: string, replyTo?: ReplyTo, target?: SendTarget): Promise<string | undefined> {
     if (!this._connected) throw new Error('QQ Bot 尚未连接');
-    const openId = await this.getTargetOpenId();
+    const frozen = await this.freezeSendTarget(target);
+    const openId = frozen.peerId;
     const body: Record<string, unknown> = { content: text, msg_type: 0 };
     const operationId = log.nextId('qq-send');
     const startedAt = Date.now();
@@ -468,15 +707,15 @@ export class QqBotClient extends vscode.Disposable {
       : Number.POSITIVE_INFINITY;
     if (replyTo?.messageId && replyTo.direction === 'received' && replyAgeSeconds <= C2C_PASSIVE_REPLY_WINDOW_SECONDS) {
       // A quoted inbound QQ message can simultaneously be a passive reply.
-      const reply = await this.reserveReply(openId, replyTo.messageId);
+      const reply = await this.reserveReply(openId, replyTo.messageId, frozen);
       if (reply) {
         body.msg_id = reply.messageId;
         body.msg_seq = reply.sequence;
       } else {
-        await this.applyRecentPassiveReply(openId, body);
+        await this.applyRecentPassiveReply(openId, body, frozen, Boolean(target));
       }
     } else {
-      await this.applyRecentPassiveReply(openId, body);
+      await this.applyRecentPassiveReply(openId, body, frozen, Boolean(target));
     }
     if (replyTo?.referenceId) {
       body.message_reference = { message_id: replyTo.referenceId };
@@ -491,14 +730,14 @@ export class QqBotClient extends vscode.Disposable {
       replyContextKey: this.messageKey(body.msg_id),
       hasReference: Boolean(body.message_reference),
     });
-    const response = await this.sendMessage(openId, body);
+    const response = await this.sendMessage(openId, body, true, undefined, frozen);
     log.info('[QQ Send] text accepted', {
       operationId,
       durationMs: Date.now() - startedAt,
       messageId: response.id,
       referenceId: response.ext_info?.ref_idx,
     });
-    const appId = await this.getAppId();
+    const appId = frozen.accountId;
     const chatMessage: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
       type: MsgType.Text,
@@ -516,12 +755,12 @@ export class QqBotClient extends vscode.Disposable {
     return undefined;
   }
 
-  async sendImage(imagePath: string): Promise<string | undefined> {
+  async sendImage(imagePath: string, target?: SendTarget): Promise<string | undefined> {
     if (!this._connected) throw new Error('QQ Bot 尚未连接');
-    const openId = await this.getTargetOpenId();
+    const frozen = await this.freezeSendTarget(target);
+    const openId = frozen.peerId;
     const file = await fs.promises.readFile(imagePath);
     const fileName = path.basename(imagePath);
-    const userPath = `/v2/users/${encodeURIComponent(openId)}`;
     const operationId = log.nextId('qq-media');
     const startedAt = Date.now();
     log.info('[QQ Media] image upload started', {
@@ -531,67 +770,13 @@ export class QqBotClient extends vscode.Disposable {
       extension: path.extname(fileName).toLowerCase(),
     });
 
-    const prepared = await this.requestApi<UploadPrepareResponse>(`${userPath}/upload_prepare`, {
-      method: 'POST',
-      body: JSON.stringify({
-        file_type: 1,
-        file_size: String(file.length),
-        file_name: fileName,
-        md5: crypto.createHash('md5').update(file).digest('hex'),
-        sha1: crypto.createHash('sha1').update(file).digest('hex'),
-        md5_10m: crypto.createHash('md5').update(file.subarray(0, MD5_10M_BYTES)).digest('hex'),
-      }),
-    });
-    if (!prepared.upload_id) {
-      throw new Error('QQ 图片预上传未返回 upload_id');
-    }
-    log.info('[QQ Media] upload prepared', {
-      operationId,
-      uploadId: prepared.upload_id,
-      partCount: prepared.parts?.length || 0,
-      blockSize: prepared.block_size,
-    });
-
-    const defaultBlockSize = Number(prepared.block_size);
-    if (prepared.parts?.length && (!Number.isFinite(defaultBlockSize) || defaultBlockSize <= 0)) {
-      throw new Error('QQ 图片预上传返回了无效 block_size');
-    }
-    const parts = (prepared.parts || []).map((part) => ({
-      ...part,
-      resolvedIndex: Number(part.index ?? part.part_index),
-      resolvedUrl: part.presigned_url || part.upload_url || '',
-    }));
-    if (!parts.length) throw new Error('QQ 图片预上传未返回分片地址');
-    if (parts.some((part) => !Number.isFinite(part.resolvedIndex) || !part.resolvedUrl)) {
-      throw new Error('QQ 图片预上传返回了无效分片信息');
-    }
-    const indexBase = parts.some((part) => part.resolvedIndex === 0) ? 0 : 1;
-    for (const part of parts.sort((a, b) => a.resolvedIndex - b.resolvedIndex)) {
-      const partSize = Number(part.block_size) || defaultBlockSize;
-      const start = (part.resolvedIndex - indexBase) * defaultBlockSize;
-      const chunk = file.subarray(start, Math.min(start + partSize, file.length));
-      await this.putUploadPart(part.resolvedUrl, chunk, part.resolvedIndex);
-      await this.finishUploadPart(userPath, {
-        upload_id: prepared.upload_id,
-        part_index: part.resolvedIndex,
-        block_size: String(chunk.length),
-        md5: crypto.createHash('md5').update(chunk).digest('hex'),
-      });
-    }
-
-    const media = await this.requestApi<MediaUploadResponse>(`${userPath}/files`, {
-      method: 'POST',
-      body: JSON.stringify({ upload_id: prepared.upload_id }),
-    });
-    const fileInfo = media.file_info || media.file_uuid;
-    if (!fileInfo) throw new Error('QQ 图片合并未返回 file_info');
-    log.info('[QQ Media] upload merged', { operationId, fileInfo });
+    const fileInfo = await this.uploadMedia(openId, file, fileName, 1, operationId, frozen);
 
     const sendBody: Record<string, unknown> = {
       msg_type: 7,
       media: { file_info: fileInfo },
     };
-    await this.applyRecentPassiveReply(openId, sendBody);
+    await this.applyRecentPassiveReply(openId, sendBody, frozen, Boolean(target));
     log.info('[QQ Send] sending image message', {
       operationId,
       openId,
@@ -599,14 +784,14 @@ export class QqBotClient extends vscode.Disposable {
       replySequence: sendBody.msg_seq,
       replyContextKey: this.messageKey(sendBody.msg_id),
     });
-    const response = await this.sendMessage(openId, sendBody);
+    const response = await this.sendMessage(openId, sendBody, true, undefined, frozen);
     log.info('[QQ Send] image accepted', {
       operationId,
       durationMs: Date.now() - startedAt,
       messageId: response.id,
       referenceId: response.ext_info?.ref_idx,
     });
-    const appId = await this.getAppId();
+    const appId = frozen.accountId;
     const chatMessage: Omit<ChatMessage, 'id'> = {
       direction: 'sent',
       type: MsgType.Image,
@@ -636,9 +821,157 @@ export class QqBotClient extends vscode.Disposable {
     return undefined;
   }
 
-  async getDecryptedImageUrl(messageId: number): Promise<string | undefined> {
+  async sendFile(filePath: string, originalName?: string, target?: SendTarget): Promise<string | undefined> {
+    let sendStarted = false;
     try {
-      const filePath = path.join(this.context.globalStorageUri.fsPath, 'qq-images', `${messageId}.json`);
+      if (!this._connected) throw new Error('QQ Bot 尚未连接');
+      const frozen = await this.freezeSendTarget(target);
+      let file: Buffer;
+      try {
+        const stat = await fs.promises.stat(filePath);
+        if (!stat.isFile()) throw new FileSendError('请选择普通文件');
+        if (stat.size <= 0) throw new FileSendError('文件为空，无法发送');
+        if (stat.size > MAX_FILE_BYTES) throw new FileSendError('文件超过 20 MiB 发送限制');
+        file = await fs.promises.readFile(filePath);
+      } catch (error) {
+        if (error instanceof FileSendError) throw error;
+        throw new FileSendError('无法读取待发送文件，请重新选择文件。');
+      }
+      if (!file.length) throw new Error('文件为空，无法发送');
+      if (file.length > MAX_FILE_BYTES) throw new Error('文件超过 20 MiB 发送限制');
+      const fileName = sanitizeFileName(originalName ?? path.basename(filePath));
+      const openId = frozen.peerId;
+      const appId = frozen.accountId;
+      const operationId = log.nextId('qq-file');
+      const startedAt = Date.now();
+      log.info('[QQ Media] file upload started', {
+        operationId, bytes: file.length, extension: path.extname(fileName).toLowerCase(),
+      });
+      const fileInfo = await this.uploadMedia(openId, file, fileName, 4, operationId, frozen);
+      const sendBody: Record<string, unknown> = { msg_type: 7, media: { file_info: fileInfo } };
+      await this.applyRecentPassiveReply(openId, sendBody, frozen, Boolean(target));
+      // The upload uses srv_send_msg=false, so failures above cannot have sent a chat message.
+      // From this boundary a timeout or persistence error may follow an accepted message.
+      sendStarted = true;
+      const response = await this.sendMessage(openId, sendBody, false, FILE_REQUEST_TIMEOUT_MS, frozen);
+      if (typeof response?.id !== 'string' || !response.id.trim()) return 'QQ 文件消息未返回消息 ID，无法确认是否已送达；请先在 QQ 中核实，避免重复发送。';
+      log.info('[QQ Send] file accepted', {
+        operationId, durationMs: Date.now() - startedAt, messageId: response.id,
+      });
+      const chatMessage: Omit<ChatMessage, 'id'> = {
+        direction: 'sent', type: MsgType.File, content: `[文件：${fileName}]`,
+        parts: [{ type: MsgType.File, fileName, size: file.length }],
+        timestamp: this.responseTimestamp(response.timestamp), context_token: '',
+        from_user_id: appId, to_user_id: openId, message_id: response.id,
+        reference_id: response.ext_info?.ref_idx, reply_to: null,
+      };
+      const id = await this.db.insertMessage(chatMessage);
+      this._onMessage.fire({ ...chatMessage, id });
+      return undefined;
+    } catch (error) {
+      if (sendStarted) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new FileSendError(message.replace(/https?:\/\/[^\s"'<>]+/gi, '[链接已隐藏]'));
+    }
+  }
+
+  async downloadFile(part: ChatMessagePart, signal?: AbortSignal): Promise<Buffer> {
+    const spec = getFileDownloadSpec(part, this.channelName);
+    if (!spec) throw new Error('该 QQ 附件没有可用的下载地址');
+    return downloadFileBytes(spec, { dispatcher: this.getProxyAgent(), signal });
+  }
+
+  private async uploadMedia(openId: string, file: Buffer, fileName: string, fileType: 1 | 4, operationId: string, target?: SendTarget): Promise<string> {
+    const userPath = `/v2/users/${encodeURIComponent(openId)}`;
+    const prepared = await this.requestApi<UploadPrepareResponse>(`${userPath}/upload_prepare`, {
+      method: 'POST',
+      ...(fileType === 4 ? { signal: AbortSignal.timeout(FILE_REQUEST_TIMEOUT_MS) } : {}),
+      body: JSON.stringify({
+        file_type: fileType,
+        file_size: String(file.length),
+        file_name: fileName,
+        md5: crypto.createHash('md5').update(file).digest('hex'),
+        sha1: crypto.createHash('sha1').update(file).digest('hex'),
+        md5_10m: crypto.createHash('md5').update(file.subarray(0, MD5_10M_BYTES)).digest('hex'),
+      }),
+    }, true, target);
+    if (typeof prepared.upload_id !== 'string' || !prepared.upload_id) {
+      throw new Error('QQ 媒体预上传未返回 upload_id');
+    }
+    log.info('[QQ Media] upload prepared', {
+      operationId,
+      uploadId: prepared.upload_id,
+      partCount: prepared.parts?.length || 0,
+      blockSize: prepared.block_size,
+    });
+
+    const defaultBlockSize = Number(prepared.block_size);
+    if (!Number.isSafeInteger(defaultBlockSize) || defaultBlockSize <= 0) {
+      throw new Error('QQ 媒体预上传返回了无效 block_size');
+    }
+    const parts = (Array.isArray(prepared.parts) ? prepared.parts : []).map((part) => ({
+      ...part,
+      resolvedIndex: Number(part.index ?? part.part_index),
+      resolvedUrl: part.presigned_url || part.upload_url || '',
+    }));
+    if (!parts.length) throw new Error('QQ 媒体预上传未返回分片地址');
+    if (parts.some((part) => !Number.isSafeInteger(part.resolvedIndex) || !part.resolvedUrl)) {
+      throw new Error('QQ 媒体预上传返回了无效分片信息');
+    }
+    const indexBase = parts.some((part) => part.resolvedIndex === 0) ? 0 : 1;
+    parts.sort((a, b) => a.resolvedIndex - b.resolvedIndex);
+    if (parts.length !== Math.ceil(file.length / defaultBlockSize)) throw new Error('QQ 媒体预上传分片未覆盖完整文件');
+    for (const [offset, part] of parts.entries()) {
+      const partSize = part.block_size === undefined ? defaultBlockSize : Number(part.block_size);
+      const requiredSize = Math.min(defaultBlockSize, file.length - offset * defaultBlockSize);
+      if (part.resolvedIndex !== indexBase + offset || !Number.isSafeInteger(partSize)
+          || partSize < requiredSize || partSize > defaultBlockSize) {
+        throw new Error('QQ 媒体预上传返回了重复、缺失或无效分片');
+      }
+      const url = new URL(part.resolvedUrl);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
+        throw new Error('QQ 媒体预上传返回了无效分片地址');
+      }
+      if (fileType === 4) {
+        // COS presigned uploads can use hosts outside the inbound QQ CDN list.
+        // Only accept HTTPS public-looking hostnames from the authenticated API;
+        // literal IPs, local names and redirects must never receive file bytes.
+        const host = url.hostname.toLowerCase();
+        if (url.protocol !== 'https:' || (url.port && url.port !== '443')
+            || isIP(host.replace(/^\[|\]$/g, '')) || !host.includes('.') || host.endsWith('.')
+            || /(?:^|\.)(?:localhost|local|localdomain|internal|lan|home)$/.test(host)
+            || /[\u0000-\u0020\u007f\\]/.test(part.resolvedUrl)) {
+          throw new Error('QQ 文件预上传返回了不安全的分片地址');
+        }
+      }
+    }
+    for (const [offset, part] of parts.entries()) {
+      const start = offset * defaultBlockSize;
+      const chunk = file.subarray(start, Math.min(start + defaultBlockSize, file.length));
+      await this.assertTargetAccount(target);
+      await this.putUploadPart(part.resolvedUrl, chunk, part.resolvedIndex, fileType === 4 ? FILE_REQUEST_TIMEOUT_MS : undefined, target);
+      await this.finishUploadPart(userPath, {
+        upload_id: prepared.upload_id,
+        part_index: part.resolvedIndex,
+        block_size: String(chunk.length),
+        md5: crypto.createHash('md5').update(chunk).digest('hex'),
+      }, fileType === 4 ? FILE_REQUEST_TIMEOUT_MS : undefined, target);
+    }
+
+    const media = await this.requestApi<MediaUploadResponse>(`${userPath}/files`, {
+      method: 'POST',
+      ...(fileType === 4 ? { signal: AbortSignal.timeout(FILE_REQUEST_TIMEOUT_MS) } : {}),
+      body: JSON.stringify({ upload_id: prepared.upload_id, file_type: fileType, file_name: fileName, srv_send_msg: false }),
+    }, true, target);
+    const fileInfo = media.file_info;
+    if (typeof fileInfo !== 'string' || !fileInfo.trim()) throw new Error('QQ 媒体合并未返回 file_info');
+    log.info('[QQ Media] upload merged', { operationId });
+    return fileInfo;
+  }
+
+  async getDecryptedImageUrl(messageId: number, partIndex?: number): Promise<string | undefined> {
+    try {
+      const filePath = path.join(this.context.globalStorageUri.fsPath, 'qq-images', `${imageCacheKey(messageId, partIndex)}.json`);
       const raw = await fs.promises.readFile(filePath, 'utf8');
       return JSON.parse(raw).dataUrl;
     } catch {
@@ -651,22 +984,24 @@ export class QqBotClient extends vscode.Disposable {
     this.stopPolling();
     this.accessToken = '';
     this.accessTokenExpiresAt = 0;
+    this.accessTokenCredentialKey = '';
     await this.clearSession();
     await this.context.secrets.delete(QQ_APP_ID_SECRET);
     await this.context.secrets.delete(QQ_APP_SECRET_SECRET);
     this.emitStatus('QQ Bot 已断开，凭据已清除');
   }
 
-  private async sendMessage(openId: string, body: Record<string, unknown>): Promise<SendMessageResponse> {
+  private async sendMessage(openId: string, body: Record<string, unknown>, requireMessageId = true, timeoutMs?: number, target?: SendTarget): Promise<SendMessageResponse> {
+    await this.assertTargetAccount(target);
     const response = await this.requestApi<SendMessageResponse>(
       `/v2/users/${encodeURIComponent(openId)}/messages`,
-      { method: 'POST', body: JSON.stringify(body) }
+      { method: 'POST', body: JSON.stringify(body), ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) }, true, target
     );
-    if (!response.id) throw new Error('QQ 消息接口未返回消息 ID，无法确认已送达');
+    if (requireMessageId && !response.id) throw new Error('QQ 消息接口未返回消息 ID，无法确认已送达');
     return response;
   }
 
-  private async requestApi<T>(urlPath: string, init: RequestInit = {}, retryAuth = true): Promise<T> {
+  private async requestApi<T>(urlPath: string, init: RequestInit = {}, retryAuth = true, target?: SendTarget): Promise<T> {
     const requestId = log.nextId('qq-http');
     const startedAt = Date.now();
     const method = String(init.method || 'GET').toUpperCase();
@@ -678,7 +1013,9 @@ export class QqBotClient extends vscode.Disposable {
       retryAuth,
       proxy: Boolean(this.getProxyAgent()),
     });
-    const token = await this.getAccessToken();
+    await this.assertTargetAccount(target);
+    const token = await this.getAccessToken(false, init.signal, target);
+    await this.assertTargetAccount(target);
     const response = await fetch(`${API_BASE_URL}${urlPath}`, {
       ...init,
       headers: {
@@ -706,8 +1043,9 @@ export class QqBotClient extends vscode.Disposable {
         status: response.status,
         durationMs: Date.now() - startedAt,
       });
-      await this.getAccessToken(true);
-      return this.requestApi<T>(urlPath, init, false);
+      await this.assertTargetAccount(target);
+      await this.getAccessToken(true, init.signal, target);
+      return this.requestApi<T>(urlPath, init, false, target);
     }
 
     const text = await response.text();
@@ -749,19 +1087,27 @@ export class QqBotClient extends vscode.Disposable {
     return data as T;
   }
 
-  private async getAccessToken(force = false): Promise<string> {
-    if (!force && this.accessToken && Date.now() < this.accessTokenExpiresAt - TOKEN_REFRESH_MARGIN_MS) {
+  private async getAccessToken(force = false, signal?: AbortSignal | null, target?: SendTarget): Promise<string> {
+    await this.assertTargetAccount(target);
+    const credentials = await this.getCredentials();
+    const credentialKey = this.credentialKey(credentials);
+    if (target && (credentials.appId !== target.accountId || (target.sessionKey && target.sessionKey !== credentialKey))) {
+      throw new FileSendError('QQ Bot 凭据已变化，请重新选择收件人');
+    }
+    if (!force && this.accessToken && this.accessTokenCredentialKey === credentialKey
+        && Date.now() < this.accessTokenExpiresAt - TOKEN_REFRESH_MARGIN_MS) {
       log.debug('[QQ Auth] using cached access token', {
         expiresInSeconds: Math.max(0, Math.floor((this.accessTokenExpiresAt - Date.now()) / 1000)),
       });
       return this.accessToken;
     }
-    const { appId, appSecret } = await this.getCredentials();
+    const { appId, appSecret } = credentials;
     const requestId = log.nextId('qq-auth');
     const startedAt = Date.now();
     log.info('[QQ Auth] requesting access token', { requestId, appId, force });
     const response = await fetch(ACCESS_TOKEN_URL, {
       method: 'POST',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         'User-Agent': 'VsChat/0.9.5',
@@ -789,8 +1135,12 @@ export class QqBotClient extends vscode.Disposable {
       );
     }
     const expiresIn = Number(data.expires_in || 7200);
+    if (this.credentialKey(await this.getCredentials()) !== credentialKey) {
+      throw new FileSendError('QQ Bot 凭据在刷新期间变化，请重新选择收件人');
+    }
     this.accessToken = data.access_token;
     this.accessTokenExpiresAt = Date.now() + expiresIn * 1000;
+    this.accessTokenCredentialKey = credentialKey;
     log.info('[QQ Auth] access token refreshed', {
       requestId,
       appId,
@@ -831,9 +1181,10 @@ export class QqBotClient extends vscode.Disposable {
   }
 
   /** Prefer a recent passive reply, avoiding proactive-message restrictions. */
-  private async applyRecentPassiveReply(openId: string, body: Record<string, unknown>): Promise<void> {
-    const reply = await this.reserveReply(openId);
+  private async applyRecentPassiveReply(openId: string, body: Record<string, unknown>, target?: SendTarget, requirePassive = false): Promise<void> {
+    const reply = await this.reserveReply(openId, undefined, target);
     if (!reply) {
+      if (requirePassive) throw new FileSendError('此 QQ 联系人的被动回复额度已用尽或过期，请等待对方的新消息');
       log.warn('[QQ Send] no usable passive reply context; falling back to proactive mode', {
         openId, hint: '请在 QQ 中给机器人发送一条新消息以获得新的被动回复额度',
       });
@@ -849,13 +1200,18 @@ export class QqBotClient extends vscode.Disposable {
     });
   }
 
-  private async reserveReply(openId: string, messageId?: string) {
-    return this.db.reserveQqReply({
-      appId: await this.getAppId(), openId, messageId,
+  private replyOptions(appId: string, openId: string, messageId?: string) {
+    return {
+      appId, openId, messageId,
       nowSeconds: Math.floor(Date.now() / 1000),
       windowSeconds: C2C_PASSIVE_REPLY_WINDOW_SECONDS,
       maxReplies: C2C_MAX_PASSIVE_REPLIES,
-    });
+    };
+  }
+
+  private async reserveReply(openId: string, messageId?: string, target?: SendTarget) {
+    await this.assertTargetAccount(target);
+    return this.db.reserveQqReply(this.replyOptions(target?.accountId || await this.getAppId(), openId, messageId));
   }
 
   private messageKey(value: unknown): string | undefined {
@@ -864,14 +1220,17 @@ export class QqBotClient extends vscode.Disposable {
       : undefined;
   }
 
-  private async putUploadPart(url: string, chunk: Buffer, index: number): Promise<void> {
+  private async putUploadPart(url: string, chunk: Buffer, index: number, timeoutMs?: number, target?: SendTarget): Promise<void> {
     let lastStatus = 0;
     for (let attempt = 0; attempt < 3; attempt++) {
+      await this.assertTargetAccount(target);
       const startedAt = Date.now();
       try {
         const response = await fetch(url, {
           method: 'PUT',
           body: chunk,
+          redirect: 'error',
+          ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
           headers: {
             'Content-Type': 'application/octet-stream',
             'Content-Length': String(chunk.length),
@@ -895,13 +1254,13 @@ export class QqBotClient extends vscode.Disposable {
           status: response.status,
           durationMs: Date.now() - startedAt,
         });
-      } catch (err) {
+      } catch {
         log.warn('[QQ Media] upload part network failure', {
           index,
           attempt: attempt + 1,
           durationMs: Date.now() - startedAt,
-        }, log.formatError(err));
-        if (attempt === 2) throw err;
+        });
+        if (attempt === 2) throw new Error(`QQ 媒体分片 ${index} 上传失败，请检查网络后重试`);
       }
       if (attempt < 2) {
         const delayMs = 1_000 * (2 ** attempt);
@@ -909,16 +1268,17 @@ export class QqBotClient extends vscode.Disposable {
         await this.sleep(delayMs);
       }
     }
-    throw new Error(`QQ 图片分片 ${index} 上传失败：HTTP ${lastStatus || 'network error'}`);
+    throw new Error(`QQ 媒体分片 ${index} 上传失败：HTTP ${lastStatus || 'network error'}`);
   }
 
-  private async finishUploadPart(userPath: string, body: Record<string, unknown>): Promise<void> {
+  private async finishUploadPart(userPath: string, body: Record<string, unknown>, timeoutMs?: number, target?: SendTarget): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.requestApi(`${userPath}/upload_part_finish`, {
           method: 'POST',
+          ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
           body: JSON.stringify(body),
-        });
+        }, true, target);
         return;
       } catch (err) {
         if (!(err instanceof QqBotError) || !err.retryable || attempt === 2) throw err;
@@ -951,70 +1311,93 @@ export class QqBotClient extends vscode.Disposable {
     return this.cachedProxyAgent;
   }
 
-  private sendGateway(payload: GatewayPayload): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      log.warn('[QQ Gateway] payload not sent; socket is not open', {
-        op: payload.op,
-        socketState: this.socket?.readyState,
-      });
-      return;
+  private sendGateway(payload: GatewayPayload, connection = this.activeGateway): boolean {
+    if (!connection || !this.isCurrent(connection)) return false;
+    if (connection.socket.readyState !== WebSocket.OPEN) {
+      this.failGateway(connection, 'QQ Gateway 连接已不可用');
+      return false;
     }
-    this.socket.send(JSON.stringify(payload));
+    try {
+      connection.socket.send(JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      this.failGateway(connection, 'QQ Gateway 发送控制帧失败', error);
+      return false;
+    }
   }
 
-  private handleGatewayClose(code: number, reason: string): void {
-    log.warn('[QQ Gateway] socket closed', {
-      code,
-      reason: reason || 'none',
-      shouldRun: this.shouldRun,
-      sequence: this.sequence,
-    });
-    if (!this.shouldRun) return;
-    if (code === 4006 || code === 4007 || (code >= 4900 && code <= 4913)) {
-      void this.clearSession();
+  private detachGateway(connection: GatewayConnection, reason: string, closeSocket = true): void {
+    if (connection.closed) return;
+    connection.closed = true;
+    connection.controller.abort();
+    for (const timer of [connection.heartbeatTimer, connection.ackTimer, connection.readyTimer]) {
+      if (timer) this.cancelTimer(timer);
     }
-    if (code === 4008) this.reconnectDelay = Math.max(this.reconnectDelay, 60_000);
+    connection.heartbeatTimer = connection.ackTimer = connection.readyTimer = undefined;
+    connection.awaitingAck = false;
+    for (const item of connection.queue.splice(0)) {
+      connection.queuedBytes -= item.bytes;
+      item.reject(new Error('QQ Gateway connection ended before dispatch completed'));
+    }
+    if (this.activeGateway === connection) {
+      this.activeGateway = undefined;
+      this.socket = null;
+      this._connected = false;
+    }
+    if (closeSocket && connection.socket.readyState < WebSocket.CLOSING) {
+      try { connection.socket.close(4000, reason.slice(0, 80)); }
+      catch { /* The connection is fenced even if its transport cannot close. */ }
+    }
+  }
+
+  private failGateway(connection: GatewayConnection, detail: string, error?: unknown): void {
+    if (!this.isCurrent(connection)) return;
+    log.warn('[QQ Gateway] reconnecting after failure', { detail }, error ? log.formatError(error) : undefined);
+    this.detachGateway(connection, 'connection recovery');
+    this.scheduleReconnect(detail);
+  }
+
+  private async handleGatewayClose(code: number, connection: GatewayConnection): Promise<void> {
+    if (!this.shouldRun || connection.generation !== this.gatewayGeneration) return;
+    log.warn('[QQ Gateway] socket closed', { code, sequence: connection.sequence });
     if ([4001, 4002, 4010, 4011, 4012, 4013, 4014, 4914, 4915].includes(code)) {
       this.shouldRun = false;
-      log.error('[QQ Gateway] reconnect disabled after fatal close', { code, reason: reason || 'none' });
-      this.emitStatus(`QQ Gateway 拒绝连接（${code}）：${reason || '请检查事件权限或机器人状态'}`);
+      this.setHealth('error', `QQ Gateway 拒绝连接（${code}），请检查机器人权限、分片或平台状态后重新连接`);
       return;
     }
-    this.emitStatus(`QQ 连接中断，${this.reconnectDelay / 1000} 秒后重连…`);
-    this.scheduleReconnect();
+    if (code === 4006 || code === 4007 || (code >= 4900 && code <= 4913)) {
+      await this.clearSession(connection.sessionId);
+    }
+    if (!this.shouldRun || connection.generation !== this.gatewayGeneration) return;
+    if (code === 4008) this.reconnectDelay = Math.max(this.reconnectDelay, 60_000);
+    this.scheduleReconnect(`QQ 连接中断（${code || '网络异常'}）`);
   }
 
-  private scheduleReconnect(): void {
-    if (!this.shouldRun || this.reconnectTimer) {
-      log.debug('[QQ Gateway] reconnect not scheduled', {
-        shouldRun: this.shouldRun,
-        alreadyScheduled: Boolean(this.reconnectTimer),
-      });
+  private scheduleReconnect(detail = 'QQ 连接中断'): void {
+    if (!this.shouldRun || this.disposed || this.reconnectTimer || this.activeGateway) return;
+    if (this.pendingDispatchWork) {
+      this.setHealth('reconnecting', `${detail}；等待未完成消息处理结束后重连…`);
       return;
     }
     const delay = this.reconnectDelay;
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
-    log.info('[QQ Gateway] reconnect scheduled', { delayMs: delay, nextDelayMs: this.reconnectDelay });
-    this.reconnectTimer = setTimeout(() => {
+    this.setHealth('reconnecting', `${detail}，${delay / 1000} 秒后重连…`, this.now() + delay);
+    this.reconnectTimer = this.after(delay, () => {
       this.reconnectTimer = undefined;
       void this.connectGateway();
-    }, delay);
-  }
-
-  private clearHeartbeat(): void {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = undefined;
-  }
-
-  private async clearSession(): Promise<void> {
-    log.info('[QQ Gateway] clearing persisted resume session', {
-      hadSession: Boolean(this.sessionId),
-      sequence: this.sequence,
     });
+  }
+
+  private async clearSession(expectedSessionId?: string): Promise<void> {
+    this.forceIdentify = true;
+    this.resumeCheckpoint = undefined;
     this.sessionId = '';
     this.sequence = null;
-    await this.db.setMetadata('qq_gateway_session_id', '');
-    await this.db.setMetadata('qq_gateway_seq', '');
+    // A cancelled handler may already be inside the atomic DB write. Its
+    // completion must precede clearing an invalid checkpoint.
+    await this.pendingDispatchWork?.catch(() => {});
+    if (expectedSessionId) await this.db.clearQqGatewayCheckpoint(expectedSessionId);
+    else if (expectedSessionId === undefined) await this.db.clearQqGatewayCheckpoint();
   }
 
   private extValue(values: string[], key: string): string {
@@ -1035,10 +1418,10 @@ export class QqBotClient extends vscode.Disposable {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private async persistImage(messageId: number, dataUrl: string): Promise<void> {
-    const directory = path.join(this.context.globalStorageUri.fsPath, 'qq-images');
-    await fs.promises.mkdir(directory, { recursive: true });
-    await fs.promises.writeFile(path.join(directory, `${messageId}.json`), JSON.stringify({ dataUrl }));
+  private async persistImage(messageId: number, dataUrl: string, partIndex?: number): Promise<void> {
+    await persistImageCache(this.context.globalStorageUri.fsPath, 'qq', messageId, dataUrl, partIndex);
+    // Release the media lock before taking the DB lock (DB -> media order).
+    await this.db.markMessageMediaReady(messageId);
     log.debug('[QQ Media] image persisted', { dbId: messageId, bytes: Buffer.byteLength(dataUrl) });
   }
 
@@ -1050,6 +1433,8 @@ export class QqBotClient extends vscode.Disposable {
   dispose(): void {
     log.debug('[QQ] disposing client');
     this.stopPolling();
+    this.disposed = true;
+    this._onConnectionHealth.dispose();
     this._onMessage.dispose();
     this._onStatus.dispose();
     this._onQrCode.dispose();

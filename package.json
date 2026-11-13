@@ -39,6 +39,10 @@
     },
     "commands": [
       {
+        "command": "vschat.openChat",
+        "title": "VsChat: Open Chat"
+      },
+      {
         "command": "vschat.login",
         "title": "VsChat: Login"
       },
@@ -70,6 +74,24 @@
     "configuration": {
       "title": "VsChat",
       "properties": {
+        "vschat.renderMarkdown": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render Markdown in Chat and message context. Raw HTML and embedded Markdown images stay inert. Output and Changes modes remain plain text. Takes effect immediately."
+        },
+        "vschat.sendShortcut": {
+          "type": "string",
+          "enum": [
+            "enter",
+            "ctrlEnter"
+          ],
+          "enumDescriptions": [
+            "Enter sends; Shift+Enter inserts a new line.",
+            "Ctrl+Enter or Cmd+Enter sends; Enter inserts a new line."
+          ],
+          "default": "enter",
+          "description": "Message send shortcut. Takes effect immediately. Input method composition never sends a message."
+        },
         "vschat.channel": {
           "type": "string",
           "enum": [
@@ -91,12 +113,12 @@
         "vschat.fromUserId": {
           "type": "string",
           "default": "",
-          "description": "WeChat contact ID to chat with (e.g., o9cq800kum_xxx@im.wechat). Leave empty to auto-detect."
+          "description": "Legacy WeChat contact hint. The chat panel requires an explicitly selected, discovered conversation and does not switch recipients based on this setting."
         },
         "vschat.qqUserOpenId": {
           "type": "string",
           "default": "",
-          "description": "Optional QQ user OpenID for proactive messages. Leave empty to use the most recent user who messaged the bot."
+          "description": "Optional QQ OpenID candidate shown in the recipient selector. Select it explicitly; a usable passive reply context is required. This setting does not grant proactive-send permission or automatically change the current recipient."
         },
         "vschat.barkUrl": {
           "type": "string",
@@ -126,7 +148,7 @@
     "vscode:prepublish": "npm run build",
     "build": "npm run typecheck && npm run bundle && npm run copy-wasm",
     "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap",
-    "copy-wasm": "cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm 2>/dev/null || true",
+    "copy-wasm": "node -e \"require('fs').copyFileSync('node_modules/sql.js/dist/sql-wasm.wasm', 'dist/sql-wasm.wasm')\"",
     "typecheck": "tsc -p ./ --noEmit",
     "test": "node --test tests/*.test.cjs",
     "compile": "npm run build",
@@ -134,7 +156,7 @@
   },
   "dependencies": {
     "https-proxy-agent": "^7.0.2",
-    "markdown-it": "^14.0.0",
+    "markdown-it": "^14.3.3",
     "proper-lockfile": "^4.1.2",
     "qrcode": "^1.5.4",
     "sql.js": "^1.10.3",

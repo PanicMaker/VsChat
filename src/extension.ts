@@ -49,19 +49,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     : new WxClient(context, db);
   context.subscriptions.push(client);
 
-  // Try to restore previous session before registering provider
-  try {
-    const restored = await client.restoreLogin();
-    if (restored) {
-      await client.startPolling();
-    }
-  } catch (err) {
-    log.warn('[Core] session restore failed; manual login remains available', log.formatError(err));
-  }
-
   // Global message subscription: receive logging + Bark push must work even
-  // when the VsChat side panel is closed (the panel's own onMessage
-  // subscription only exists while the webview is visible).
+  // when the VsChat side panel is closed.
   context.subscriptions.push(
     client.onMessage(async (chatMsg) => {
       log.info('[Core] message event', {
@@ -80,12 +69,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // Register chat view provider (after restore so connected state is correct)
+  // Establish the shared unread baseline and listeners before transport events.
   const provider = new ChatViewProvider(context, client, db);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider),
+    vscode.commands.registerCommand('vschat.openChat', () => provider.revealLatest()),
     provider
   );
+  await provider.start();
+
+  try {
+    const restored = await client.restoreLogin();
+    if (restored) {
+      await client.startPolling();
+      await provider.loadHistory();
+    }
+  } catch (err) {
+    log.warn('[Core] session restore failed; manual login remains available', log.formatError(err));
+  }
 
   // Register commands
   context.subscriptions.push(
