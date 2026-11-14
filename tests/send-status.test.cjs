@@ -222,3 +222,11 @@ test('legacy sends retain errors and warnings, and ready announces the channel b
   assert.ok(readyMessages.findIndex(msg => msg.command === 'channel')
     < readyMessages.findIndex(msg => msg.command === 'syncMessages'));
 });
+
+test('image preparation rejection is failed while a final unknown error remains uncertain', async t => {
+  for (const [error, expected] of [[new FileSendError('upload failed'), 'failed'], [new Error('final request timeout'), 'uncertain']]) {
+    const ui = setup(t, { async sendImage() { throw error; } });
+    await ui.send({ command: 'sendImage', requestId: 'image-classification', fileName: 'test.png', imageData: 'data:image/png;base64,YWJj' });
+    assert.equal(ui.outbound.at(-1).sendStatus, expected);
+  }
+});

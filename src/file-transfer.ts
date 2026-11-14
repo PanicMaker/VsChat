@@ -10,7 +10,7 @@ const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 3;
 const FILE_HOST_SUFFIXES = ['qq.com', 'qq.com.cn', 'qpic.cn', 'gtimg.cn'];
 
-/** Only use this before the final message request could have reached a peer. */
+/** Definite non-delivery: preparation failed, or the platform explicitly rejected the message. */
 export class FileSendError extends Error {
   readonly deliveryState = 'not_sent';
   constructor(message: string) {

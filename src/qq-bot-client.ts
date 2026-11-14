@@ -142,7 +142,7 @@ interface MediaUploadResponse {
 }
 
 class QqBotError extends Error {
-  constructor(message: string, readonly retryable: boolean) {
+  constructor(message: string, readonly retryable: boolean, readonly definitelyRejected = false) {
     super(message);
     this.name = 'QqBotError';
   }
@@ -756,69 +756,78 @@ export class QqBotClient extends vscode.Disposable {
   }
 
   async sendImage(imagePath: string, target?: SendTarget): Promise<string | undefined> {
-    if (!this._connected) throw new Error('QQ Bot 尚未连接');
-    const frozen = await this.freezeSendTarget(target);
-    const openId = frozen.peerId;
-    const file = await fs.promises.readFile(imagePath);
-    const fileName = path.basename(imagePath);
-    const operationId = log.nextId('qq-media');
-    const startedAt = Date.now();
-    log.info('[QQ Media] image upload started', {
-      operationId,
-      openId,
-      bytes: file.length,
-      extension: path.extname(fileName).toLowerCase(),
-    });
+    let sendStarted = false;
+    try {
+      if (!this._connected) throw new Error('QQ Bot 尚未连接');
+      const frozen = await this.freezeSendTarget(target);
+      const openId = frozen.peerId;
+      const file = await fs.promises.readFile(imagePath);
+      const fileName = path.basename(imagePath);
+      const operationId = log.nextId('qq-media');
+      const startedAt = Date.now();
+      log.info('[QQ Media] image upload started', {
+        operationId,
+        openId,
+        bytes: file.length,
+        extension: path.extname(fileName).toLowerCase(),
+      });
 
-    const fileInfo = await this.uploadMedia(openId, file, fileName, 1, operationId, frozen);
+      const fileInfo = await this.uploadMedia(openId, file, fileName, 1, operationId, frozen);
 
-    const sendBody: Record<string, unknown> = {
-      msg_type: 7,
-      media: { file_info: fileInfo },
-    };
-    await this.applyRecentPassiveReply(openId, sendBody, frozen, Boolean(target));
-    log.info('[QQ Send] sending image message', {
-      operationId,
-      openId,
-      mode: sendBody.msg_id ? 'passive' : 'proactive',
-      replySequence: sendBody.msg_seq,
-      replyContextKey: this.messageKey(sendBody.msg_id),
-    });
-    const response = await this.sendMessage(openId, sendBody, true, undefined, frozen);
-    log.info('[QQ Send] image accepted', {
-      operationId,
-      durationMs: Date.now() - startedAt,
-      messageId: response.id,
-      referenceId: response.ext_info?.ref_idx,
-    });
-    const appId = frozen.accountId;
-    const chatMessage: Omit<ChatMessage, 'id'> = {
-      direction: 'sent',
-      type: MsgType.Image,
-      content: '[Image]',
-      timestamp: this.responseTimestamp(response.timestamp),
-      context_token: '',
-      from_user_id: appId,
-      to_user_id: openId,
-      message_id: response.id,
-      reference_id: response.ext_info?.ref_idx,
-      reply_to: null,
-    };
-    const id = await this.db.insertMessage(chatMessage);
-    const extension = path.extname(imagePath).toLowerCase();
-    const mimeType = extension === '.jpg' || extension === '.jpeg'
-      ? 'image/jpeg'
-      : extension === '.gif'
-        ? 'image/gif'
-        : extension === '.webp'
-          ? 'image/webp'
-          : extension === '.bmp'
-            ? 'image/bmp'
-            : 'image/png';
-    const imageDataUrl = `data:${mimeType};base64,${file.toString('base64')}`;
-    await this.persistImage(id, imageDataUrl);
-    this._onMessage.fire({ ...chatMessage, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
-    return undefined;
+      const sendBody: Record<string, unknown> = {
+        msg_type: 7,
+        media: { file_info: fileInfo },
+      };
+      await this.applyRecentPassiveReply(openId, sendBody, frozen, Boolean(target));
+      log.info('[QQ Send] sending image message', {
+        operationId,
+        openId,
+        mode: sendBody.msg_id ? 'passive' : 'proactive',
+        replySequence: sendBody.msg_seq,
+        replyContextKey: this.messageKey(sendBody.msg_id),
+      });
+      sendStarted = true;
+      const response = await this.sendMessage(openId, sendBody, true, FILE_REQUEST_TIMEOUT_MS, frozen);
+      log.info('[QQ Send] image accepted', {
+        operationId,
+        durationMs: Date.now() - startedAt,
+        messageId: response.id,
+        referenceId: response.ext_info?.ref_idx,
+      });
+      const appId = frozen.accountId;
+      const chatMessage: Omit<ChatMessage, 'id'> = {
+        direction: 'sent',
+        type: MsgType.Image,
+        content: '[Image]',
+        timestamp: this.responseTimestamp(response.timestamp),
+        context_token: '',
+        from_user_id: appId,
+        to_user_id: openId,
+        message_id: response.id,
+        reference_id: response.ext_info?.ref_idx,
+        reply_to: null,
+      };
+      const id = await this.db.insertMessage(chatMessage);
+      const extension = path.extname(imagePath).toLowerCase();
+      const mimeType = extension === '.jpg' || extension === '.jpeg'
+        ? 'image/jpeg'
+        : extension === '.gif'
+          ? 'image/gif'
+          : extension === '.webp'
+            ? 'image/webp'
+            : extension === '.bmp'
+              ? 'image/bmp'
+              : 'image/png';
+      const imageDataUrl = `data:${mimeType};base64,${file.toString('base64')}`;
+      await this.persistImage(id, imageDataUrl);
+      this._onMessage.fire({ ...chatMessage, id, imageDataUrl } as ChatMessage & { imageDataUrl?: string });
+      return undefined;
+    } catch (error) {
+      if (sendStarted || error instanceof FileSendError) throw error;
+      // Upload/merge use srv_send_msg=false; no peer message exists yet.
+      const message = error instanceof Error ? error.message : '图片准备失败';
+      throw new FileSendError(message.replace(/https?:\/\/[^\s"'<>]+/gi, '[链接已隐藏]'));
+    }
   }
 
   async sendFile(filePath: string, originalName?: string, target?: SendTarget): Promise<string | undefined> {
@@ -885,7 +894,7 @@ export class QqBotClient extends vscode.Disposable {
     const userPath = `/v2/users/${encodeURIComponent(openId)}`;
     const prepared = await this.requestApi<UploadPrepareResponse>(`${userPath}/upload_prepare`, {
       method: 'POST',
-      ...(fileType === 4 ? { signal: AbortSignal.timeout(FILE_REQUEST_TIMEOUT_MS) } : {}),
+      signal: AbortSignal.timeout(FILE_REQUEST_TIMEOUT_MS),
       body: JSON.stringify({
         file_type: fileType,
         file_size: String(file.length),
@@ -949,18 +958,18 @@ export class QqBotClient extends vscode.Disposable {
       const start = offset * defaultBlockSize;
       const chunk = file.subarray(start, Math.min(start + defaultBlockSize, file.length));
       await this.assertTargetAccount(target);
-      await this.putUploadPart(part.resolvedUrl, chunk, part.resolvedIndex, fileType === 4 ? FILE_REQUEST_TIMEOUT_MS : undefined, target);
+      await this.putUploadPart(part.resolvedUrl, chunk, part.resolvedIndex, FILE_REQUEST_TIMEOUT_MS, target);
       await this.finishUploadPart(userPath, {
         upload_id: prepared.upload_id,
         part_index: part.resolvedIndex,
         block_size: String(chunk.length),
         md5: crypto.createHash('md5').update(chunk).digest('hex'),
-      }, fileType === 4 ? FILE_REQUEST_TIMEOUT_MS : undefined, target);
+      }, FILE_REQUEST_TIMEOUT_MS, target);
     }
 
     const media = await this.requestApi<MediaUploadResponse>(`${userPath}/files`, {
       method: 'POST',
-      ...(fileType === 4 ? { signal: AbortSignal.timeout(FILE_REQUEST_TIMEOUT_MS) } : {}),
+      signal: AbortSignal.timeout(FILE_REQUEST_TIMEOUT_MS),
       body: JSON.stringify({ upload_id: prepared.upload_id, file_type: fileType, file_name: fileName, srv_send_msg: false }),
     }, true, target);
     const fileInfo = media.file_info;
@@ -993,10 +1002,16 @@ export class QqBotClient extends vscode.Disposable {
 
   private async sendMessage(openId: string, body: Record<string, unknown>, requireMessageId = true, timeoutMs?: number, target?: SendTarget): Promise<SendMessageResponse> {
     await this.assertTargetAccount(target);
-    const response = await this.requestApi<SendMessageResponse>(
-      `/v2/users/${encodeURIComponent(openId)}/messages`,
-      { method: 'POST', body: JSON.stringify(body), ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) }, true, target
-    );
+    let response: SendMessageResponse;
+    try {
+      response = await this.requestApi<SendMessageResponse>(
+        `/v2/users/${encodeURIComponent(openId)}/messages`,
+        { method: 'POST', body: JSON.stringify(body), ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) }, true, target
+      );
+    } catch (error) {
+      if (error instanceof QqBotError && error.definitelyRejected) throw new FileSendError(error.message);
+      throw error;
+    }
     if (requireMessageId && !response.id) throw new Error('QQ 消息接口未返回消息 ID，无法确认已送达');
     return response;
   }
@@ -1072,7 +1087,9 @@ export class QqBotClient extends vscode.Disposable {
       throw new QqBotError(
         `QQ API ${response.status}${businessCode ? `/${businessCode}` : ''}: ` +
         `${data.message || response.statusText}${trace ? ` (trace: ${trace})` : ''}`,
-        retryable
+        retryable,
+        (response.status >= 400 && response.status < 500 && response.status !== 408)
+          || (response.ok && businessCode !== 0)
       );
     }
     log.debug('[QQ HTTP] response', {
@@ -1233,7 +1250,8 @@ export class QqBotClient extends vscode.Disposable {
           ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
           headers: {
             'Content-Type': 'application/octet-stream',
-            'Content-Length': String(chunk.length),
+            // fetch computes Content-Length from the Buffer body. Avoid supplying
+            // a second length header through VS Code's networking integration.
           },
           dispatcher: this.getProxyAgent(),
         } as RequestInit);
@@ -1254,13 +1272,38 @@ export class QqBotClient extends vscode.Disposable {
           status: response.status,
           durationMs: Date.now() - startedAt,
         });
-      } catch {
+      } catch (error) {
+        const safeCode = (value: unknown) => typeof value === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(value) ? value : undefined;
+        const cause = error instanceof Error ? (error as Error & { cause?: { code?: unknown; message?: unknown } }).cause : undefined;
+        const parameterReasons: Record<string, string> = {
+          'duplicate content-length header': 'duplicate_content_length',
+          'invalid content-length header': 'invalid_content_length',
+          'invalid transfer-encoding header': 'invalid_transfer_encoding',
+          'invalid connection header': 'invalid_connection',
+          'invalid keep-alive header': 'invalid_keep_alive',
+          'invalid upgrade header': 'invalid_upgrade',
+          'invalid header key': 'invalid_header_key',
+          'invalid header value': 'invalid_header_value',
+          'invalid path': 'invalid_path',
+          'Proxy Authentication Required (407)': 'proxy_auth_required',
+          'Proxy-Authorization should be sent in ProxyAgent constructor': 'proxy_auth_header',
+        };
+        const parameterReason = typeof cause?.message === 'string'
+          ? parameterReasons[cause.message] : undefined;
+        const failureReason = parameterReason || (cause?.message === 'bad port' ? 'blocked_port'
+          : cause?.message === 'unexpected redirect' ? 'redirect_blocked' : undefined);
+        const networkCode = safeCode(cause?.code) || safeCode((error as { code?: unknown })?.code);
         log.warn('[QQ Media] upload part network failure', {
+          networkCode, failureReason,
+          errorType: error instanceof TypeError ? 'TypeError' : error instanceof Error && error.name === 'AbortError' ? 'AbortError' : 'Error',
           index,
           attempt: attempt + 1,
           durationMs: Date.now() - startedAt,
         });
-        if (attempt === 2) throw new Error(`QQ 媒体分片 ${index} 上传失败，请检查网络后重试`);
+        if (networkCode === 'UND_ERR_INVALID_ARG') {
+          throw new Error(`QQ 媒体分片 ${index} 上传请求参数错误（${networkCode}${parameterReason ? ` / ${parameterReason}` : ''}），已停止重试，请提供此错误代码以便排查`);
+        }
+        if (attempt === 2) throw new Error(`QQ 媒体分片 ${index} 上传失败${networkCode ? `（${networkCode}）` : ''}，请检查网络后重试`);
       }
       if (attempt < 2) {
         const delayMs = 1_000 * (2 ** attempt);

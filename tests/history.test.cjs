@@ -189,7 +189,7 @@ function webview({ state: initialState, channel = 'QQ', deferFileReads = false }
     dropFiles: (files, name = 'drop') => {
       let prevented = false;
       const dataTransfer = { files, types: ['Files'] };
-      documentEvents[name]?.({ dataTransfer, preventDefault() { prevented = true; } });
+      events[name]?.({ dataTransfer, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
       return { prevented, dataTransfer };
     },
     keyDown: (key, details = {}) => {
@@ -790,7 +790,7 @@ test('shortcut updates refresh composer and image hints without altering drafts 
   const file = pasteImage(ui);
   ui.receive({ command: 'settings', sendShortcut: 'ctrlEnter' });
   assert.match(ui.element('text-input').title, /Ctrl\/Cmd\+Enter/);
-  assert.match(ui.element('paste-status').textContent, /Ctrl\/Cmd\+Enter/);
+  assert.match(ui.element('paste-status').title, /Ctrl\/Cmd\+Enter/);
   assert.equal(ui.element('text-input').value, 'keep my draft');
   assert.equal(ui.element('paste-preview').src, file.data);
   ui.element('send-btn').click();
@@ -798,7 +798,7 @@ test('shortcut updates refresh composer and image hints without altering drafts 
   ui.receive({ command: 'settings', sendShortcut: 'enter' });
   assert.equal(ui.state().drafts.QQ.send.requestId, request.requestId);
   assert.equal(ui.element('send-btn').disabled, true);
-  assert.match(ui.element('paste-status').textContent, /· Enter 发送/);
+  assert.match(ui.element('paste-status').title, /Enter 发送/);
   assert.equal(ui.element('quote-bar').classList.contains('hidden'), false);
 });
 
@@ -1211,10 +1211,16 @@ function enableFiles(ui, overrides = {}) {
   ui.receive({ command: 'fileCapabilities', fileCapabilities: { canSend: true, maxBytes: 20 * 1024 * 1024, ...overrides } });
 }
 
+function chooseClientFile(ui) {
+  const count = ui.readers.length;
+  ui.element('file-input').events.change({ target: { files: [{name: 'report.txt', type: 'text/plain', size: 3, data: 'data:text/plain;base64,YWJj'}] } });
+  if (ui.readers.length > count) ui.readers.pop().complete();
+}
+
 function selectFileDraft(ui, fileId = 'opaque-file', fileName = 'report.txt', size = 1024) {
-  ui.element('attach-file-btn').click();
+  chooseClientFile(ui);
   const request = ui.outbound.at(-1);
-  assert.equal(request.command, 'selectFile');
+  assert.equal(request.command, 'stageFile');
   ui.receive({ command: 'fileSelected', requestId: request.requestId, fileDraft: { fileId, fileName, size } });
   return request;
 }
@@ -1225,20 +1231,20 @@ const attachment = (id, overrides = {}) => ({ ...message(id), type: 4, parts: [
   { type: 4, fileName: 'received.txt', size: 2048, fileAction: { canSave: true }, ...overrides },
 ] });
 
-test('native file selection waits for capabilities, stages only opaque metadata and sends explicitly', () => {
+test('client file selection waits for capabilities, stages only opaque metadata and sends explicitly', () => {
   const ui = webview();
   writeDraft(ui, 'independent text');
   selectQuote(ui);
-  assert.equal(ui.element('attach-file-btn').disabled, true);
+  assert.equal(ui.element('attach-btn').disabled, false, 'images remain available');
   enableFiles(ui, { canSend: false, reason: 'QQ 当前不支持文件发送' });
-  assert.match(ui.element('attach-file-btn').title, /QQ 当前不支持/);
-  assert.ok(nodeText(ui.element('input-bar')).includes('QQ 当前不支持'));
+  chooseClientFile(ui);
+  assert.match(ui.element('send-status').textContent, /QQ 当前不支持/);
+  assert.equal(ui.outbound.some(msg => msg.command === 'stageFile'), false);
   enableFiles(ui);
-  assert.match(ui.element('attach-file-btn').title, /20 MiB/);
   selectFileDraft(ui, 'opaque-1', '<report & notes>.txt');
   assert.equal(sends(ui).length, 0);
   assert.equal(ui.element('file-draft-name').textContent, '<report & notes>.txt · 1.0 KB');
-  assert.match(fileStatusText(ui), /待发送文件.*20 MiB/);
+  assert.match(fileStatusText(ui), /待发送/);
   assert.deepEqual(ui.state().drafts.QQ.file, { fileId: 'opaque-1', fileName: '<report & notes>.txt', size: 1024 });
   ui.element('send-btn').click();
   const request = sends(ui).at(-1);
@@ -1253,11 +1259,11 @@ test('native file selection waits for capabilities, stages only opaque metadata 
   assert.equal(ui.element('quote-bar').classList.contains('hidden'), false);
 });
 
-test('cancelled or failed native selection preserves the old image or file and ignores unrelated results', () => {
+test('cancelled or failed attachment staging preserves the old image or file and ignores unrelated results', () => {
   const ui = webview();
   enableFiles(ui);
   const image = pasteImage(ui);
-  ui.element('attach-file-btn').click();
+  chooseClientFile(ui);
   let request = ui.outbound.at(-1);
   ui.receive({ command: 'fileSelected', requestId: 'unrelated', fileDraft: { fileId: 'bad', fileName: 'bad', size: 1 } });
   assert.equal(ui.element('send-btn').disabled, true);
@@ -1265,12 +1271,12 @@ test('cancelled or failed native selection preserves the old image or file and i
   assert.equal(ui.element('paste-preview').src, image.data);
   selectFileDraft(ui, 'first');
   assert.equal(ui.element('paste-preview').src, undefined);
-  ui.element('attach-file-btn').click();
+  chooseClientFile(ui);
   request = ui.outbound.at(-1);
   ui.receive({ command: 'fileSelected', requestId: request.requestId, error: 'file too large' });
   assert.equal(ui.state().drafts.QQ.file.fileId, 'first');
   assert.ok(nodeText(ui.element('input-bar')).includes('file too large'));
-  ui.element('attach-file-btn').click();
+  chooseClientFile(ui);
   request = ui.outbound.at(-1);
   ui.receive({ command: 'fileSelected', requestId: request.requestId, cancelled: true });
   assert.equal(ui.state().drafts.QQ.file.fileId, 'first');
@@ -1286,7 +1292,7 @@ test('file draft remains selected during failed or cancelled image reads and is 
   const ui = webview({ deferFileReads: true });
   enableFiles(ui);
   selectFileDraft(ui);
-  ui.element('file-input').events.change({ target: { files: [{ type: 'text/plain', size: 5 }] } });
+  ui.element('file-input').events.change({ target: { files: [] } });
   assert.equal(ui.state().drafts.QQ.file.fileId, 'opaque-file');
   pasteImage(ui);
   assert.equal(ui.element('send-btn').disabled, true);
@@ -1933,7 +1939,7 @@ test('contact switching isolates text, quotes, images and file drafts without re
   assert.equal(ui.element('quote-bar').classList.contains('hidden'), true);
   writeDraft(ui, 'Bob draft');
   enableFiles(ui);
-  ui.element('attach-file-btn').click();
+  chooseClientFile(ui);
   const select = ui.outbound.at(-1);
   assert.equal(select.recipientId, 'bob');
   ui.receive({ command: 'fileSelected', requestId: select.requestId, ...bob,
@@ -1997,7 +2003,7 @@ test('background success clears only the original matching draft and attachment 
     if (kind === 'image') pasteImage(ui);
     if (kind === 'file') {
       enableFiles(ui);
-      ui.element('attach-file-btn').click();
+      chooseClientFile(ui);
       ui.receive({ command: 'fileSelected', requestId: ui.outbound.at(-1).requestId, ...alice,
         fileDraft: { fileId: 'alice-file', fileName: 'a.txt', size: 1 } });
     }
@@ -2054,10 +2060,10 @@ test('switching rejects image reads and late native selection results without co
   manageRecipients(ui);
   const alice = chooseRecipient(ui, 'alice');
   writeDraft(ui, 'Alice keep');
-  pasteImage(ui);
   enableFiles(ui);
-  ui.element('attach-file-btn').click();
+  chooseClientFile(ui);
   const select = ui.outbound.at(-1);
+  pasteImage(ui);
   const bob = chooseRecipient(ui, 'bob');
   writeDraft(ui, 'Bob keep');
   ui.readers[0].complete();
@@ -2408,7 +2414,7 @@ test('image drops stage one image without sending or losing text, and reject uns
   assert.equal(ui.element('text-input').value, 'keep text');
   assert.equal(sends(ui).length, 0);
   ui.dropFiles([file, file]);
-  assert.match(ui.element('send-status').textContent, /一次拖入一张/);
+  assert.match(ui.element('send-status').textContent, /一次添加一个/);
   assert.equal(ui.element('paste-preview').src, file.data);
   ui.dropFiles([{ type: 'text/plain', size: 2 }]);
   assert.equal(sends(ui).length, 0);
@@ -2466,4 +2472,80 @@ test('success feedback no longer occupies a row while failed delivery stays acti
   ui.receive({ command: 'sendStatus', requestId: sends(ui).at(-1).requestId, sendStatus: 'failed', error: 'offline' });
   assert.equal(ui.element('send-feedback').classList.contains('hidden'), false);
   assert.equal(ui.element('retry-send').classList.contains('hidden'), false);
+});
+
+test('sending updates immediately without an extra status row and preserves failure recovery', () => {
+  const ui = webview();
+  writeDraft(ui, 'pending request');
+  ui.element('send-btn').click();
+  assert.equal(sends(ui).length, 1, 'request is posted synchronously, without a timer');
+  assert.equal(ui.element('send-btn').textContent, '发送中…');
+  assert.equal(ui.element('send-feedback').classList.contains('hidden'), true);
+  assert.equal(ui.element('text-input').value, 'pending request');
+  ui.receive({ command: 'sendStatus', requestId: sends(ui)[0].requestId, sendStatus: 'failed' });
+  assert.equal(ui.element('send-feedback').classList.contains('hidden'), false);
+  assert.equal(ui.element('retry-send').classList.contains('hidden'), false);
+});
+
+test('unified attachment selection dispatches images and files to separate safe transports', () => {
+  const ui = webview();
+  enableFiles(ui);
+  const image = { type: 'image/png', size: 3, name: 'local.png', data: 'data:image/png;base64,YWJj' };
+  ui.element('file-input').events.change({ target: { files: [image] } });
+  assert.equal(ui.element('paste-preview').src, image.data);
+  assert.equal(sends(ui).length, 0);
+  selectFileDraft(ui);
+  assert.equal(ui.element('paste-preview').src, undefined);
+  assert.equal(ui.state().drafts.QQ.file.fileId, 'opaque-file');
+  assert.equal(sends(ui).length, 0);
+});
+
+
+test('external image dragenter is claimed before VS Code can activate its editor overlay', () => {
+  const ui = webview();
+  const file = { type: 'image/png', size: 3, name: 'fixture.png', data: 'data:image/png;base64,YWJj' };
+  const entered = ui.dropFiles([file], 'dragenter');
+  assert.equal(entered.prevented, true);
+  assert.equal(entered.dataTransfer.dropEffect, 'copy');
+  assert.equal(ui.element('input-bar').classList.contains('drag-over'), true);
+  assert.equal(sends(ui).length, 0);
+  ui.dropFiles([file]);
+  assert.equal(ui.element('paste-preview').src, file.data);
+});
+
+test('image-only attachment returns focus and follows Enter or Cmd+Enter without requiring text', () => {
+  for (const [shortcut, modifiers] of [['enter', {}], ['ctrlEnter', { metaKey: true }]]) {
+    const ui = webview();
+    ui.receive({ command: 'settings', sendShortcut: shortcut });
+    const file = { type: 'image/png', size: 3, name: 'fixture.png', data: 'data:image/png;base64,YWJj' };
+    ui.dropFiles([file]);
+    assert.equal(ui.element('text-input').focused, true);
+    assert.equal(ui.element('text-input').value, '');
+    if (shortcut === 'ctrlEnter') {
+      ui.element('text-input').events.keydown({ key: 'Enter', preventDefault() { assert.fail('plain Enter should edit'); } });
+      assert.equal(sends(ui).length, 0);
+    }
+    ui.element('text-input').events.keydown({ key: 'Enter', ...modifiers, preventDefault() {} });
+    assert.equal(sends(ui).length, 1);
+    assert.equal(sends(ui)[0].command, 'sendImage');
+    assert.equal(sends(ui)[0].imageData, file.data);
+  }
+});
+
+test('image-only shortcut and button both respect expired recipient quota with a visible explanation', () => {
+  const ui = webview();
+  manageRecipients(ui);
+  chooseRecipient(ui, 'alice');
+  manageRecipients(ui, recipientOptions.map(option => option.id === 'alice'
+    ? { ...option, canSend: false, reason: '暂无可用被动回复额度，请让此联系人给机器人发送一条新消息' } : option));
+  const file = { type: 'image/png', size: 3, name: 'fixture.png', data: 'data:image/png;base64,YWJj' };
+  ui.dropFiles([file]);
+  assert.equal(ui.element('send-btn').disabled, true);
+  assert.match(ui.element('send-btn').title, /被动回复额度/);
+  assert.match(ui.element('send-status').textContent, /被动回复额度/);
+  assert.equal(ui.element('send-feedback').classList.contains('hidden'), false);
+  ui.element('text-input').events.keydown({ key: 'Enter', preventDefault() {} });
+  ui.element('send-btn').click();
+  assert.equal(sends(ui).length, 0);
+  assert.equal(ui.element('paste-preview').src, file.data);
 });

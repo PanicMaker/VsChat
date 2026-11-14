@@ -77,6 +77,7 @@ export interface WebViewOutbound {
   requestId?: string; // correlates one send attempt with its result
   text?: string;
   imagePath?: string; // local file path for images
+  fileData?: string; // bounded base64 data URL from a user-selected client file
   imageData?: string; // base64 data URL for images from WebView
   fileName?: string;
   url?: string;

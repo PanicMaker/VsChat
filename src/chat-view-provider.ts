@@ -372,7 +372,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.refreshSharedHistory(true);
       } else if (msg.command === 'sendMessage' || msg.command === 'sendImage' || msg.command === 'sendFile') {
         await this.handleSend(msg, operationId);
-      } else if (msg.command === 'selectFile') {
+      } else if (msg.command === 'selectFile' || msg.command === 'stageFile') {
         if (!this.matchesSelection(msg) || (this.recipientMode && !this.conversation)) return;
         await this.files.select(msg);
       } else if (msg.command === 'getFileDraft') {
@@ -836,14 +836,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <div id="quote-preview"></div>
             <button id="quote-cancel" title="取消引用">&times;</button>
           </div>
-          <input type="file" id="file-input" accept="image/*" class="hidden">
+          <input type="file" id="file-input" class="hidden">
           <textarea id="text-input" rows="2" aria-label="消息内容" title="Enter 发送，Shift+Enter 换行" placeholder="Type a message..."></textarea>
           <div class="composer-actions">
             <button id="emoji-btn" type="button" title="插入表情" aria-label="插入表情">😊</button>
-            <details id="attachment-picker" class="composer-picker"><summary title="添加附件" aria-label="添加附件">📎</summary><div class="composer-menu">
-            <button id="attach-btn" type="button" title="选择图片" aria-label="选择图片">图片</button>
-            <button id="attach-file-btn" type="button" title="选择文件（最多 20 MiB）" aria-label="选择文件" disabled>文件</button>
-            </div></details>
+            <button id="attach-btn" type="button" title="添加图片或文件" aria-label="添加图片或文件">📎</button>
             <details id="recipient-picker" class="composer-picker"><summary id="recipient-summary" title="选择收件人">收件人</summary><div class="composer-menu">
         <div id="recipient-bar" class="recipient-bar hidden">
           <label for="recipient-select">发送给</label>

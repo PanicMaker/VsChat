@@ -990,3 +990,41 @@ body.mode-log .message:focus-within .quote-action, body.mode-git .message:focus-
 body.mode-chat .message .quote-action { display: flex; opacity: 0; }
 body.mode-chat .message:hover .quote-action, body.mode-chat .message:focus-within .quote-action { opacity: 1; }
 @media (hover: none) { body.mode-chat .message .quote-action { opacity: 1; } }
+
+/* Compact log rows: timestamps and multipart text share the first baseline. */
+body.mode-log .message { overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
+body.mode-log .message .timestamp, body.mode-git .message .timestamp { white-space: nowrap; }
+body.mode-log .message-part[data-type="1"] { display: inline; margin: 0; }
+body.mode-log .message .msg-text { white-space: pre; overflow-wrap: normal; }
+body.mode-log .message-part[data-type="1"] + .message-part[data-type="1"],
+body.mode-git .message-part[data-type="1"] + .message-part[data-type="1"] { margin-left: .5em; }
+
+/* Shared controls across Chat, Output and Changes. */
+body:is(.mode-chat, .mode-log, .mode-git) #attach-btn,
+.composer-menu button, #paste-cancel, #file-draft-cancel {
+  color: var(--vscode-button-secondaryForeground, #ddd);
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px; font: inherit; font-size: 12px; min-height: 26px; padding: 4px 7px; cursor: pointer;
+}
+.composer-menu button:hover, #paste-cancel:hover, #file-draft-cancel:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+}
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #0078d4); outline-offset: 1px;
+}
+body:is(.mode-chat, .mode-log, .mode-git) #send-btn { min-width: 76px; white-space: nowrap; }
+#paste-draft:not(.hidden), #file-draft:not(.hidden) {
+  display: flex; align-items: center; gap: 6px; padding: 5px 7px;
+  border: 1px solid var(--vscode-panel-border, #555); border-radius: 4px;
+}
+#paste-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+#paste-preview { max-width: 48px; max-height: 36px; object-fit: contain; }
+#paste-cancel, #file-draft-cancel { align-self: center; }
+.composer-menu input, .composer-menu select { border-radius: 3px; min-height: 26px; }
+#recipient-alias-save { margin-left: auto; }
+@media (max-width: 360px) {
+  .composer-actions { gap: 2px; }
+  #recipient-picker > summary { max-width: 82px; }
+}

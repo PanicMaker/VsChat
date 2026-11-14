@@ -427,3 +427,42 @@ test('legacy QQ bare URLs resolve into sanitized cards and a remote save destina
   assert.equal(workspaceWrites[0].destination.scheme, 'vscode-remote');
   assert.equal(ui.result('attachmentStatus', 'legacy-qq').fileStatus, 'saved');
 });
+
+test('client attachment bytes stage privately and send only after explicit confirmation', async t => {
+  const ui = await setup(t);
+  await ui.send({ command: 'stageFile', requestId: 'client', fileName: '../../client.txt',
+    fileData: 'data:text/plain;base64,YWJj', imagePath: '/untrusted/never-read' });
+  const result = ui.result('fileSelected', 'client');
+  assert.ok(result.fileDraft, result.error);
+  assert.equal(result.fileDraft.fileName, 'client.txt');
+  assert.equal(result.fileDraft.size, 3);
+  assert.equal(ui.sendCalls.length, 0);
+  assert.equal(openDialogs.length, 0);
+  await ui.send({ command: 'sendFile', requestId: 'client-send', fileId: result.fileDraft.fileId });
+  assert.equal(ui.sendCalls.length, 1);
+  assert.equal(ui.sendCalls[0].bytes.toString(), 'abc');
+});
+
+test('client attachment staging rejects invalid, empty and oversized bytes without replacing an existing draft', async t => {
+  const ui = await setup(t, { overrides: { fileCapabilities: { canSend: true, maxBytes: 8 } } });
+  await ui.send({ command: 'stageFile', requestId: 'good', fileName: 'good.txt', fileData: 'data:;base64,YWJj' });
+  const draft = ui.result('fileSelected', 'good').fileDraft;
+  assert.ok(draft);
+  const inputs = ['data:text/plain;base64,', 'file:///private/file', 'data:text/plain;base64,YQ',
+    'data:text/plain;base64,YR==', 'data:text/plain;base64,' + Buffer.alloc(9).toString('base64'),
+    'data:text/plain;base64,' + 'A'.repeat(400)];
+  for (const [i, fileData] of inputs.entries()) {
+    await ui.send({ command: 'stageFile', requestId: `bad-${i}`, fileData, fileName: 'bad.txt' });
+    assert.ok(ui.result('fileSelected', `bad-${i}`).error);
+    await ui.send({ command: 'getFileDraft', fileId: draft.fileId });
+    assert.equal(ui.posted.at(-1).valid, true);
+  }
+  assert.equal(ui.sendCalls.length, 0);
+});
+
+test('unsupported channel cannot stage client file bytes', async t => {
+  const ui = await setup(t, { overrides: { fileCapabilities: { canSend: false, maxBytes: MAX_FILE_BYTES, reason: 'unsupported' } } });
+  await ui.send({ command: 'stageFile', requestId: 'blocked', fileName: 'client.txt', fileData: 'data:;base64,YWJj' });
+  assert.match(ui.result('fileSelected', 'blocked').error, /unsupported/);
+  assert.equal(ui.sendCalls.length, 0);
+});

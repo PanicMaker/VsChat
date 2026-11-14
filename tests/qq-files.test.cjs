@@ -272,3 +272,102 @@ test('QQ download wrapper uses the shared validator and dispatcher without Bot a
   controller.abort();
   await assert.rejects(client.downloadFile({ type: 4, url: 'https://multimedia.nt.qq.com.cn/download?fileid=cancelled' }, controller.signal));
 });
+
+test('image upload and reply preparation failures are not-sent, with no final message request', async t => {
+  for (const fail of ['upload_prepare', 'put', 'upload_part_finish', 'files', 'reserve']) {
+    await t.test(fail, async st => {
+      const { client, filePath, calls, db, events } = await setup(st, { fail });
+      if (fail === 'reserve') client.applyRecentPassiveReply = async () => { throw new Error('reply unavailable'); };
+      await assert.rejects(client.sendImage(filePath), isNotSent);
+      assert.equal(calls.filter(call => call.url.endsWith('/messages')).length, 0);
+      assert.equal((await db.getRecentMessages()).length, 0);
+      assert.equal(events.length, 0);
+    });
+  }
+});
+
+test('image final timeout or missing message ID remain uncertain and never retry automatically', async t => {
+  for (const options of [{ fail: 'messages' }, { response: {} }]) {
+    const { client, filePath, calls, db } = await setup(t, options);
+    await assert.rejects(client.sendImage(filePath), error => error instanceof Error && !isNotSent(error));
+    assert.equal(calls.filter(call => call.url.endsWith('/messages')).length, 1);
+    assert.equal((await db.getRecentMessages()).length, 0);
+  }
+});
+
+test('upload failure records a safe network code without leaking signed URLs or message contents', async t => {
+  const { client } = await setup(t);
+  const dispatcher = new MockAgent(); dispatcher.disableNetConnect();
+  t.after(() => dispatcher.close());
+  client.getProxyAgent = () => dispatcher;
+  client.sleep = async () => {};
+  const failure = Object.assign(new Error('private message https://upload.invalid/?sign=private-signature'), { code: 'ECONNREFUSED' });
+  dispatcher.get('https://upload.invalid').intercept({ path: '/part?sign=private-signature', method: 'PUT' })
+    .replyWithError(failure).times(3);
+  const start = outputLines.length;
+  await assert.rejects(QqBotClient.prototype.putUploadPart.call(client,
+    'https://upload.invalid/part?sign=private-signature', Buffer.from('private contents'), 0), /ECONNREFUSED/);
+  const logs = outputLines.slice(start).join('\n');
+  assert.match(logs, /ECONNREFUSED/);
+  assert.doesNotMatch(logs, /private-signature|private message|private contents/);
+});
+
+test('final explicit QQ rejection is failed, but timeout and server errors stay uncertain', async t => {
+  for (const status of [400, 403, 408, 429, 500]) {
+    const { client } = await setup(t);
+    const dispatcher = new MockAgent(); dispatcher.disableNetConnect();
+    t.after(() => dispatcher.close());
+    client.getProxyAgent = () => dispatcher;
+    client.getAccessToken = async () => 'isolated-test-token';
+    client.requestApi = QqBotClient.prototype.requestApi;
+    dispatcher.get('https://api.bot.qq.com').intercept({ path: '/v2/users/user/messages', method: 'POST' })
+      .reply(status, JSON.stringify({ code: 123, message: 'isolated rejection' }));
+    await assert.rejects(client.sendMessage('user', { msg_type: 7 }), error =>
+      isNotSent(error) === [400, 403, 429].includes(status));
+  }
+});
+
+test('invalid upload parameters stop retries and report only allowlisted diagnostics', async t => {
+  for (const [message, expected] of [
+    ['duplicate content-length header', 'duplicate_content_length'],
+    ['Proxy Authentication Required (407)', 'proxy_auth_required'],
+    ['private https://upload.invalid/?secret=hidden', undefined],
+  ]) {
+    const { client } = await setup(t);
+    const dispatcher = new MockAgent(); dispatcher.disableNetConnect();
+    t.after(() => dispatcher.close());
+    client.getProxyAgent = () => dispatcher;
+    client.sleep = async () => { assert.fail('invalid parameters must not retry'); };
+    dispatcher.get('https://upload.invalid').intercept({ path: '/part', method: 'PUT' })
+      .replyWithError(Object.assign(new Error(message), { code: 'UND_ERR_INVALID_ARG' }));
+    const start = outputLines.length;
+    await assert.rejects(QqBotClient.prototype.putUploadPart.call(client,
+      'https://upload.invalid/part', Buffer.from('fixture'), 1), error => {
+      assert.match(error.message, /请求参数错误/);
+      assert.doesNotMatch(error.message, /检查网络|secret|hidden/);
+      if (expected) assert.ok(error.message.includes(expected));
+      return true;
+    });
+    assert.doesNotMatch(outputLines.slice(start).join('\n'), /secret|hidden/);
+    dispatcher.assertNoPendingInterceptors();
+  }
+});
+
+test('media PUT lets fetch compute a single byte-accurate length header', async t => {
+  const { client } = await setup(t);
+  const bytes = Buffer.from('图片 fixture');
+  let checked = false;
+  client.getProxyAgent = () => ({ dispatch(options, handler) {
+    const headers = Object.entries(options.headers).filter(([key]) => key.toLowerCase() === 'content-length');
+    assert.equal(headers.length, 1);
+    assert.equal(headers[0][0], 'content-length');
+    assert.equal(headers[0][1], String(bytes.length));
+    checked = true;
+    handler.onConnect(() => {});
+    handler.onHeaders(200, [], () => {}, 'OK');
+    handler.onComplete([]);
+    return true;
+  } });
+  await QqBotClient.prototype.putUploadPart.call(client, 'https://upload.invalid/part', bytes, 1);
+  assert.equal(checked, true);
+});

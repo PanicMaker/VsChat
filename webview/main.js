@@ -6,7 +6,6 @@
   const emojiBtn = document.getElementById('emoji-btn');
   const emojiPanel = document.getElementById('emoji-panel');
   const attachBtn = document.getElementById('attach-btn');
-  const attachFileBtn = document.getElementById('attach-file-btn');
   const fileDraftBar = document.getElementById('file-draft');
   const fileDraftName = document.getElementById('file-draft-name');
   const fileDraftCancel = document.getElementById('file-draft-cancel');
@@ -167,7 +166,7 @@
     currentMode = mode;
     document.body.className = `mode-${mode}${searchOpen ? ' search-open' : ''}${dataOpen ? ' data-open' : ''}`;
     textInput.placeholder = MODE_PLACEHOLDERS[mode];
-    sendBtn.textContent = MODE_SEND_LABELS[mode];
+    sendBtn.textContent = activeSend?.status === 'sending' ? '发送中…' : MODE_SEND_LABELS[mode];
     emojiPanel?.classList.add('hidden');
     updateQuoteBar();
     persistDraft();
@@ -251,24 +250,25 @@
     const busy = activeSend?.status === 'sending';
     const locked = !currentChannel || busy || !recipientCanEdit();
     textInput.readOnly = locked;
-    attachBtn.disabled = locked;
-    attachFileBtn.disabled = locked || !fileCapabilities.canSend || Boolean(activeFileSelection);
-    attachFileBtn.title = fileCapabilities.canSend ? `选择文件（最大 ${fileLimitLabel()}）` : fileCapabilities.reason || '当前通道不支持发送文件';
-    attachFileBtn.setAttribute('aria-label', attachFileBtn.title);
+    attachBtn.disabled = locked || Boolean(activeFileSelection) || Boolean(pendingImageRead);
     fileDraftCancel.disabled = locked;
     emojiBtn.disabled = locked;
     quoteCancel.disabled = locked;
     document.getElementById('paste-cancel').disabled = locked;
     sendBtn.disabled = locked || !recipientCanSend() || Boolean(activeSend) || Boolean(activeFileSelection) || Boolean(pendingImageRead)
       || Boolean(pendingImage && !pendingImage.imageData) || Boolean(pendingFile && !canSendFile());
+    const blockedReason = !recipientCanSend()
+      ? recipients.find(option => option.id === selectedRecipientId)?.reason || '请先选择可发送的联系人' : '';
+    const blockedHint = (pendingImage || pendingFile || textInput.value.trim()) ? blockedReason : '';
     sendStatusLabel.textContent = activeSend
-      ? ({ sending: '发送中…草稿将在确认成功后清除', failed: '发送失败，草稿已保留',
+      ? ({ sending: '发送中…', failed: '发送失败，草稿已保留',
         uncertain: '发送结果待确认，请先检查对方是否收到；重发可能产生重复消息' }[activeSend.status]
         + (activeSend.error ? `：${activeSend.error}` : ''))
-      : lastSendLabel;
-    const successOnly = !activeSend && ['已发送', '已确认对方收到'].includes(lastSendLabel);
-    sendFeedback.classList.toggle('hidden', !sendStatusLabel.textContent || successOnly);
-    sendBtn.title = successOnly ? lastSendLabel : '发送消息';
+      : blockedHint || lastSendLabel;
+    const successOnly = !activeSend && !blockedHint && ['已发送', '已确认对方收到'].includes(lastSendLabel);
+    sendFeedback.classList.toggle('hidden', !sendStatusLabel.textContent || successOnly || busy);
+    sendBtn.textContent = busy ? '发送中…' : MODE_SEND_LABELS[currentMode];
+    sendBtn.title = busy ? '正在等待服务器确认' : blockedReason || (successOnly ? lastSendLabel : '发送消息');
     retrySendBtn.classList.toggle('hidden', !activeSend || busy);
     confirmSendBtn.classList.toggle('hidden', activeSend?.status !== 'uncertain');
     retrySendBtn.textContent = activeSend?.status === 'uncertain' ? '确认可能重复，重新发送' : '重试发送';
@@ -276,7 +276,7 @@
       || Boolean(pendingFile && !canSendFile())
       || (!pendingFile && !pendingImage?.imageData && !textInput.value.trim());
     confirmSendBtn.disabled = !recipientCanEdit();
-    fileCapabilityStatus.textContent = fileSelectionLabel || (!fileCapabilities.canSend ? attachFileBtn.title : '');
+    fileCapabilityStatus.textContent = fileSelectionLabel;
     fileCapabilityStatus.classList.toggle('hidden', !fileCapabilityStatus.textContent);
     showFileDraft();
   }
@@ -1414,7 +1414,7 @@
 
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
-    const pickers = ['attachment-picker', 'recipient-picker', 'connection-picker'].map(id => document.getElementById(id));
+    const pickers = ['recipient-picker', 'connection-picker'].map(id => document.getElementById(id));
     if (pickers.some(picker => picker.open)) {
       pickers.forEach(picker => { picker.open = false; });
       event.preventDefault();
@@ -1839,7 +1839,7 @@
       : !pendingFile.valid ? `${pendingFile.error || '文件草稿已失效'}，请重新选择`
       : !fileCapabilities.canSend ? fileCapabilities.reason || '当前通道不支持发送文件'
       : pendingFile.size > fileLimit() ? `文件超过 ${fileLimitLabel()} 限额，请重新选择`
-      : `待发送文件 · 最大 ${fileLimitLabel()} · 点击发送（文字和引用保留为独立草稿）`;
+      : '待发送 · 文字将保留';
   }
 
   function clearFileDraft(release = true) {
@@ -1850,16 +1850,42 @@
     updateComposer();
   }
 
-  attachFileBtn.addEventListener('click', () => {
-    document.getElementById('attachment-picker').open = false;
-    if (!currentChannel || !recipientCanEdit() || !fileCapabilities.canSend || activeFileSelection || activeSend?.status === 'sending') return;
+  function imageMime(file) {
+    if (/^image\/(png|jpeg|gif|webp|bmp)$/i.test(file.type)) return file.type;
+    if (file.type && file.type !== 'application/octet-stream') return null;
+    const extension = (file.name || '').split('.').pop().toLowerCase();
+    return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp' }[extension] || null;
+  }
+
+  function stageAttachment(file) {
+    if (!currentChannel || !recipientCanEdit() || activeSend?.status === 'sending' || activeFileSelection || pendingImageRead) return;
+    if (imageMime(file)) { stageImage(file); return; }
+    if (!fileCapabilities.canSend || !file.size || file.size > fileLimit()) {
+      lastSendLabel = !fileCapabilities.canSend ? fileCapabilities.reason || '当前通道不支持文件发送'
+        : `请选择非空且不超过 ${fileLimitLabel()} 的文件`;
+      updateComposer();
+      return;
+    }
+    textInput.focus();
     const requestId = crypto.randomUUID();
+    const scope = viewScope();
     activeFileSelection = { requestId, channel: currentChannel };
-    pendingFileSelectionScopes.set(requestId, viewScope());
-    fileSelectionLabel = '正在选择文件…';
+    pendingFileSelectionScopes.set(requestId, scope);
+    fileSelectionLabel = '正在读取附件…';
     updateComposer();
-    postScoped({ command: 'selectFile', requestId });
-  });
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (activeFileSelection?.requestId !== requestId || !matchesViewScope(scope || {})) {
+        pendingFileSelectionScopes.delete(requestId);
+        return;
+      }
+      fileSelectionLabel = '正在准备附件…';
+      updateComposer();
+      postScoped({ command: 'stageFile', requestId, fileData: reader.result, fileName: file.name }, scope);
+    };
+    reader.onerror = () => receiveFileSelected({ command: 'fileSelected', requestId, ...scope, error: '无法读取附件，请重新选择' });
+    reader.readAsDataURL(file);
+  }
   fileDraftCancel.addEventListener('click', () => {
     if (activeSend?.status === 'sending' || !recipientCanEdit()) return;
     clearFileDraft();
@@ -1914,7 +1940,8 @@
       draftBar.classList.remove('hidden');
       preview.src = pendingImage.imageData;
       preview.classList.remove('hidden');
-      status.textContent = `待发送图片 · ${sendShortcut === 'ctrlEnter' ? 'Ctrl/Cmd+Enter' : 'Enter'} 发送（文字和引用保留为独立草稿）`;
+      status.textContent = `${pendingImage.fileName} · 待发送`;
+      status.title = `${sendShortcut === 'ctrlEnter' ? 'Ctrl/Cmd+Enter' : 'Enter'} 发送；文字和引用保留为独立草稿`;
       return;
     }
     draftBar.classList.add('hidden');
@@ -1933,41 +1960,53 @@
     stageImage(file);
   });
 
-  // Accept OS/editor file drops without allowing the webview to navigate away.
-  const isFileDrag = event => Array.from(event.dataTransfer?.types || []).includes('Files')
-    || Boolean(event.dataTransfer?.files?.length);
-  document.addEventListener('dragover', event => {
+  // Capture before VS Code's webview drop handler can open the file in an editor.
+  const isFileDrag = event => Array.from(event.dataTransfer?.types || []).some(type =>
+    ['files', 'resourceurls', 'codefiles', 'text/uri-list'].includes(type.toLowerCase()))
+    || Boolean(event.dataTransfer?.files?.length)
+    || Array.from(event.dataTransfer?.items || []).some(item => item.kind === 'file');
+  function handleAttachmentDrag(event) {
     if (!isFileDrag(event)) return;
     event.preventDefault();
-    const allowed = !searchOpen && !dataOpen && currentChannel && recipientCanEdit() && activeSend?.status !== 'sending';
+    event.stopImmediatePropagation();
+    const allowed = !searchOpen && !dataOpen && currentChannel && recipientCanEdit()
+      && activeSend?.status !== 'sending' && !activeFileSelection && !pendingImageRead;
     if (event.dataTransfer) event.dataTransfer.dropEffect = allowed ? 'copy' : 'none';
     inputBar.classList.toggle('drag-over', Boolean(allowed));
-  });
-  document.addEventListener('dragleave', event => {
+  }
+  // VS Code starts its editor drop overlay on dragenter, before dragover.
+  // Claim both events in capture phase so the overlay cannot swallow our drop.
+  window.addEventListener('dragenter', handleAttachmentDrag, true);
+  window.addEventListener('dragover', handleAttachmentDrag, true);
+  window.addEventListener('dragleave', event => {
     if (!event.relatedTarget) inputBar.classList.remove('drag-over');
   });
-  document.addEventListener('drop', event => {
+  window.addEventListener('drop', event => {
     if (!isFileDrag(event)) return;
     event.preventDefault();
+    event.stopImmediatePropagation();
     inputBar.classList.remove('drag-over');
     if (searchOpen || dataOpen || !currentChannel || !recipientCanEdit() || activeSend?.status === 'sending') return;
-    const files = Array.from(event.dataTransfer?.files || []);
-    if (files.length !== 1 || !files[0].type.startsWith('image/')) {
-      lastSendLabel = '请一次拖入一张图片；普通文件请从附件菜单选择。';
+    let files = Array.from(event.dataTransfer?.files || []);
+    if (!files.length) files = Array.from(event.dataTransfer?.items || [])
+      .filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean);
+    if (files.length !== 1) {
+      lastSendLabel = files.length ? '请一次添加一个附件。' : '未取得文件内容，请点击回形针从本机选择；远程编辑器路径不能直接作为附件。';
       updateComposer();
       return;
     }
-    stageImage(files[0]);
-  });
+    stageAttachment(files[0]);
+  }, true);
 
   function stageImage(file) {
     if (!currentChannel || !recipientCanEdit() || activeSend?.status === 'sending') return;
     const scope = viewScope();
     draftBar.classList.remove('hidden');
-    if (!/^image\/(png|jpeg|gif|webp|bmp)$/i.test(file.type) || file.size > 10 * 1024 * 1024) {
+    if (!imageMime(file) || !file.size || file.size > 10 * 1024 * 1024) {
       status.textContent = '请选择不超过 10 MB 的 PNG、JPEG、GIF、WebP 或 BMP 图片';
       return;
     }
+    textInput.focus();
     const draft = { id: crypto.randomUUID(), fileName: file.name || 'clipboard.' + file.type.split('/')[1], imageData: null };
     pendingImageRead = draft;
     updateComposer();
@@ -1989,7 +2028,7 @@
       status.textContent = '图片读取失败，请重新粘贴';
       updateComposer();
     };
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(file.type === imageMime(file) ? file : file.slice(0, file.size, imageMime(file)));
   }
 
   function sendDraft() {
@@ -2114,13 +2153,12 @@
   }
 
   attachBtn.addEventListener('click', () => {
-    document.getElementById('attachment-picker').open = false;
     fileInput.click();
   });
 
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
-    if (file) stageImage(file);
+    if (file) stageAttachment(file);
     fileInput.value = '';
   });
 
@@ -2166,7 +2204,7 @@
   });
 
   document.addEventListener('click', (e) => {
-    for (const id of ['attachment-picker', 'recipient-picker', 'connection-picker']) {
+    for (const id of ['recipient-picker', 'connection-picker']) {
       if (!e.target.closest(`#${id}`)) document.getElementById(id).open = false;
     }
     if (!e.target.closest('#emoji-panel') && !e.target.closest('#emoji-btn')) {

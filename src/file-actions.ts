@@ -94,34 +94,51 @@ export class FileActions {
     try {
       const capability = this.capabilities();
       if (!capability.canSend) throw new Error(capability.reason || '当前通道暂不支持文件发送。');
-      const selected = await vscode.window.showOpenDialog({ canSelectMany: false, canSelectFiles: true,
-        canSelectFolders: false, openLabel: '选择文件', title: '选择待发送文件（最多 20 MiB）' });
-      if (!current()) return;
-      if (!selected?.length) { this.post({ command: 'fileSelected', requestId, ...scope, cancelled: true }); return; }
-      if (selected.length !== 1 || selected[0].scheme !== 'file') throw new Error('请选择扩展宿主中的普通文件。');
-      const handle = await fs.promises.open(selected[0].fsPath,
-        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
       let bytes: Buffer;
-      try {
-        const stat = await handle.stat();
-        if (!stat.isFile() || stat.size <= 0 || stat.size > capability.maxBytes) throw new Error('请选择非空且不超过 20 MiB 的普通文件。');
-        const buffer = Buffer.alloc(Math.min(capability.maxBytes, MAX_FILE_BYTES) + 1);
-        let count = 0;
-        while (count < buffer.length) {
-          const read = await handle.read(buffer, count, buffer.length - count, count);
-          if (!read.bytesRead) break;
-          count += read.bytesRead;
+      let fileName: string;
+      if (message.command === 'stageFile') {
+        const input = message.fileData;
+        const limit = Math.min(capability.maxBytes, MAX_FILE_BYTES);
+        if (typeof input !== 'string' || input.length > 4 * Math.ceil(limit / 3) + 256) {
+          throw new Error('文件超过大小限制。');
         }
-        if (!count || count > capability.maxBytes) throw new Error('文件为空或超过 20 MiB 限制。');
-        bytes = buffer.subarray(0, count);
-      } finally { await handle.close(); }
+        const match = /^data:[a-zA-Z0-9.+\/-]*;base64,([A-Za-z0-9+/]+={0,2})$/.exec(input);
+        if (!match || match[1].length % 4 !== 0) throw new Error('文件数据无效，请重新选择。');
+        bytes = Buffer.from(match[1], 'base64');
+        if (!bytes.length || bytes.length > limit || bytes.toString('base64') !== match[1]) {
+          throw new Error('文件为空或超过大小限制。');
+        }
+        fileName = sanitizeFileName(typeof message.fileName === 'string' ? message.fileName : 'attachment');
+      } else {
+        const selected = await vscode.window.showOpenDialog({ canSelectMany: false, canSelectFiles: true,
+          canSelectFolders: false, openLabel: '选择文件', title: '选择待发送文件（最多 20 MiB）' });
+        if (!current()) return;
+        if (!selected?.length) { this.post({ command: 'fileSelected', requestId, ...scope, cancelled: true }); return; }
+        if (selected.length !== 1 || selected[0].scheme !== 'file') throw new Error('请选择扩展宿主中的普通文件。');
+        fileName = sanitizeFileName(selected[0].fsPath);
+        const handle = await fs.promises.open(selected[0].fsPath,
+          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile() || stat.size <= 0 || stat.size > capability.maxBytes) throw new Error('请选择非空且不超过 20 MiB 的普通文件。');
+          const buffer = Buffer.alloc(Math.min(capability.maxBytes, MAX_FILE_BYTES) + 1);
+          let count = 0;
+          while (count < buffer.length) {
+            const read = await handle.read(buffer, count, buffer.length - count, count);
+            if (!read.bytesRead) break;
+            count += read.bytesRead;
+          }
+          if (!count || count > capability.maxBytes) throw new Error('文件为空或超过 20 MiB 限制。');
+          bytes = buffer.subarray(0, count);
+        } finally { await handle.close(); }
+      }
       if (!current()) return;
       const directory = path.join(this.context.globalStorageUri.fsPath, 'file-drafts');
       await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
       snapshot = path.join(directory, `${randomUUID()}.bin`);
       await fs.promises.writeFile(snapshot, bytes, { flag: 'wx', mode: 0o600 });
       if (!current()) return;
-      const draft: StagedFile = { fileId: randomUUID(), fileName: sanitizeFileName(selected[0].fsPath),
+      const draft: StagedFile = { fileId: randomUUID(), fileName,
         size: bytes.length, filePath: snapshot, active: false, recipientId };
       // Each recipient owns a draft; an in-flight send retains its snapshot.
       for (const file of this.staged.values()) {
