@@ -68,7 +68,7 @@
 3. 选择提示中的 **Reload Window**。命令会把 `vschat.channel` 切换为 `qq`。
 4. 重载后插件会自动连接 Gateway。首次使用时，请先从 QQ 给机器人发送一条消息，插件会从事件中记录该用户的 `user_openid`；随后在侧边栏的“发送给”中明确选择该联系人。
 
-也可以通过扩展宿主环境变量 `VSCHAT_QQ_APP_ID`、`VSCHAT_QQ_APP_SECRET` 提供凭据。`vschat.qqUserOpenId` 仅增加一个配置候选，不会自动选中或覆盖已选收件人；该对象没有可用被动回复额度时仍不能从界面发送。填写 OpenID 不代表获得主动发送权限。
+也可以通过扩展宿主环境变量 `VSCHAT_QQ_APP_ID`、`VSCHAT_QQ_APP_SECRET` 提供凭据。`vschat.qqUserOpenId` 仅增加一个配置候选，不会自动选中或覆盖已选收件人。填写 OpenID 不代表获得主动发送权限。
 
 ### QQ 通道实现范围与平台规则
 
@@ -78,7 +78,7 @@
 - 相同 QQ 消息可能重复推送，插件在账号及联系人范围内按事件消息 ID 去重；事件处理成功后，将 Gateway 序列号、Session ID 与凭据身份作为同一个恢复检查点原子保存。处理或保存失败不会把恢复位置推进到失败事件之后。
 - 多窗口共用同一数据库时，QQ 被动回复序号按 AppID、用户 OpenID 和入站消息 ID 独立持久化，在跨进程锁内原子分配；普通文本、引用、图片和文件共用计数，引用切换、重载窗口及清空聊天记录都不会把序号重置为 `1`。发送失败也不会回收已分配的序号，避免网络超时后重用已被 QQ 接受的序号。
 - 入站消息的去重、落库和上下文更新在同一锁内完成；延迟或重复事件不会回退最近上下文。用户选定联系人后，发送、上传、配额预留及历史记录统一使用固定的 AppID 与 OpenID，新来信不会改投。
-- 当前界面只在所选联系人有可用被动回复额度时允许发送：插件按 60 分钟、每条入站消息最多 4 次管理，所有窗口共用。额度过期或被其他窗口耗尽时停止发送，不自动转为主动消息。官方发送文档概要写 60 分钟，而同页 `msg_id` 字段仍写 5 分钟，存在不一致；平台实际拒绝会作为发送错误呈现，不能保证整个窗口都可送达。[QQ 单聊发送文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)
+- 当前界面优先使用所选联系人的被动回复额度：插件按 60 分钟、每条入站消息最多 4 次管理，所有窗口共用。额度过期或耗尽时向同一联系人尝试主动发送；对方需允许机器人主动发送，实际投递受平台频控限制。官方发送文档概要写 60 分钟，而同页 `msg_id` 字段仍写 5 分钟，存在不一致；平台实际拒绝会作为发送错误呈现，不能保证整个窗口都可送达。[QQ 单聊发送文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)
 - 联系人按当前 AppID 隔离，OpenID 不能跨机器人复用。更换 AppID、AppSecret 或移除凭据会使已有发送快照失效；旧连接收到的消息仍归属原机器人账号。配置候选和导入历史都不能建立被动回复额度。
 
 ### 切回微信
@@ -210,7 +210,7 @@ VsChat/
 1. **通道选择**：`extension.ts` 读取 `vschat.channel`，创建微信或 QQ 客户端，并使用各自独立的消息数据库。
 2. **微信登录/收发**：保留原扫码、`getupdates` 长轮询、iLink `sendmessage` 与加密媒体链路。
 3. **QQ 登录/接收**：AppID/AppSecret → Access Token → `/gateway` → Identify/Resume → `C2C_MESSAGE_CREATE` → 本地 DB → Webview。
-4. **QQ 发送文本**：Webview 提交已选收件人 → 宿主校验选择、固定账号与联系人 → 预留该联系人的被动回复序号 → `/v2/users/{user_openid}/messages`。
+4. **QQ 发送文本**：Webview 提交已选收件人 → 宿主校验选择、固定账号与联系人 → 有额度时预留被动回复序号，否则主动发送 → `/v2/users/{user_openid}/messages`。
 5. **QQ 发送图片**：Webview → 临时文件 → QQ 分片上传/合并 → `msg_type=7` 消息。
 6. **窗口同步与已读**：数据库变化 → 读取所选会话增量及各联系人未读数 → 更新面板和状态栏；有焦点的可见面板读到最新 → 推进该会话已读进度 → 其他共享窗口刷新。
 7. **发送普通文件**：原生文件选择 → 宿主保存文件快照并返回草稿标识 → 用户明确发送 → 通道上传并发送单个文件消息 → 确认平台回执后落库。
@@ -270,7 +270,7 @@ npx vsce package
 
 微信需要本次登录收到的真实消息确认机器人账号、联系人与对应会话信息；同一有效登录恢复时可复用其绑定记录，换登录不会继承其他登录的发送路由。`getupdates` 的轮询游标只用于继续拉取消息，不是发送用的 `context_token`。平台返回 `-14` 时按登录失效处理，停止发送并提示重新登录，不再去掉 token 重试。
 
-QQ 仅展示当前 AppID 的联系人和配置候选，界面是否可发取决于该对象当前可用的被动回复额度。`vschat.qqUserOpenId` 不隐式覆盖用户选择，也不保证主动发送权限。微信旧 `vschat.fromUserId` 设置仅保留兼容用途，新界面仍需选择由当前登录真实来信建立的对象。
+QQ 仅展示当前 AppID 的联系人和配置候选，允许向有真实来信或显式配置的联系人尝试发送。`vschat.qqUserOpenId` 不隐式覆盖用户选择，也不保证主动发送权限。微信旧 `vschat.fromUserId` 设置仅保留兼容用途，新界面仍需选择由当前登录真实来信建立的对象。
 
 发送开始时固定账号与收件人，后续上传或重试不改投；凭据或登录变化会停止未完成的发送准备。需要重试时回到原联系人的草稿操作，未知送达结果仍需先由用户核实。
 
@@ -420,7 +420,7 @@ node tests/history-performance-benchmark.cjs --rows=100000 --contacts=100
 | `vschat.renderMarkdown` | boolean | `true` | 在 Chat 和消息上下文中显示 Markdown；修改立即生效，Output / Changes 中的消息文字保持纯文本 |
 | `vschat.proxyUrl` | string | `""` | HTTP 代理 URL，留空使用系统代理 |
 | `vschat.fromUserId` | string | `""` | 旧微信路由兼容设置；新界面仍须显式选择由当前登录真实来信建立的联系人 |
-| `vschat.qqUserOpenId` | string | `""` | 增加 QQ 收件人配置候选，不自动选中或覆盖已有选择；无被动回复额度时不可发送 |
+| `vschat.qqUserOpenId` | string | `""` | 增加 QQ 收件人配置候选，不自动选中或覆盖已有选择 |
 | `vschat.logLevel` | `debug \| info \| warn \| error` | `debug` | 日志详细程度；排障结束后可改为 `info` |
 
 ### 诊断日志

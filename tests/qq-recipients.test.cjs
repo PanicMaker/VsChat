@@ -83,9 +83,16 @@ test('recipient list scopes current bot, keeps imported history read-only and do
   const byPeer = new Map(state.recipients.map(item => [item.conversation.peerId, item]));
   assert.deepEqual([...byPeer.keys()].sort(), ['alice', 'archive-peer', 'configured-peer', 'expired']);
   assert.equal(byPeer.get('alice').canSend, true);
-  for (const peer of ['archive-peer', 'configured-peer', 'expired']) {
-    assert.equal(byPeer.get(peer).canSend, false);
-    assert.match(byPeer.get(peer).reason, /被动回复/);
+  assert.equal(byPeer.get('archive-peer').canSend, false);
+  assert.match(byPeer.get('archive-peer').reason, /导入/);
+  const { calls } = mockTransport(client);
+  for (const peer of ['configured-peer', 'expired']) {
+    assert.equal(byPeer.get(peer).canSend, true);
+    const target = await client.captureSendTarget(recipientId(ref(peer)));
+    await client.sendText('hello', undefined, target);
+    assert.equal(calls.at(-1).url, '/v2/users/' + peer + '/messages');
+    assert.equal(calls.at(-1).body.msg_id, undefined);
+    assert.equal(calls.at(-1).body.msg_seq, undefined);
   }
   assert.equal((await db.peekQqReply(options())).sequence, 0);
   assert.doesNotMatch(JSON.stringify(state), /private-original-secret|sessionKey|contextToken/);
@@ -95,7 +102,7 @@ test('recipient list scopes current bot, keeps imported history read-only and do
   assert.equal((await client.getRecipients()).recipients.find(item => item.conversation.peerId === 'alice').canSend, true);
 });
 
-test('capture rejects missing, foreign, restored, exhausted and offline recipients', async t => {
+test('capture rejects missing, foreign, restored and offline recipients', async t => {
   const { client, db, changeCredentials } = await setup(t);
   await db.storeQqInbound(inbound('live'));
   await importHistory(db, inbound('archive', 'readonly'));
@@ -108,7 +115,7 @@ test('capture rejects missing, foreign, restored, exhausted and offline recipien
   assert.match(target.sessionKey, /^[a-f0-9]{64}$/);
   assert.equal((await db.peekQqReply(options())).sequence, 0);
   for (let i = 0; i < 4; i++) await db.reserveQqReply(options());
-  await assert.rejects(client.captureSendTarget(recipientId(ref())), notSent);
+  assert.deepEqual(await client.captureSendTarget(recipientId(ref())), target);
   client._connected = false;
   assert.equal((await client.getRecipients()).recipients[0].canSend, false);
   changeCredentials(null);
@@ -169,16 +176,23 @@ test('account change during upload aborts before bytes or final send and keeps t
   assert.equal((await db.peekQqReply(options())).sequence, 0);
 });
 
-test('quota consumed by another window during upload prevents proactive fallback', async t => {
+test('quota consumed by another window during upload switches to proactive delivery to the same peer', async t => {
   const { client, db, filePath } = await setup(t);
   await db.storeQqInbound(inbound('live'));
   const target = await client.captureSendTarget(recipientId(ref()));
   const { calls } = mockTransport(client, async call => {
     if (call.url.endsWith('/files')) for (let i = 0; i < 4; i++) await db.reserveQqReply(options());
   });
-  await assert.rejects(client.sendFile(filePath, 'report.txt', target), notSent);
-  assert.ok(!calls.some(call => call.url.endsWith('/messages')));
-  await assert.rejects(client.sendText('cannot fall back', undefined, target), notSent);
+  await client.sendFile(filePath, 'report.txt', target);
+  await client.sendImage(filePath, target);
+  await client.sendText('follow up', undefined, target);
+  const sends = calls.filter(call => call.url.endsWith('/messages'));
+  assert.deepEqual(sends.map(call => call.body.msg_type), [7, 7, 0]);
+  for (const call of sends) {
+    assert.equal(call.url, '/v2/users/alice/messages');
+    assert.equal(call.body.msg_id, undefined);
+    assert.equal(call.body.msg_seq, undefined);
+  }
 });
 
 test('explicit targets use independent peer quotas and never recycle a failed attempt', async t => {

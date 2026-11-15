@@ -630,13 +630,13 @@ export class QqBotClient extends vscode.Disposable {
     }
     const recipients = [...peers.values()].map(item => {
       const conversation = { accountId, peerId: item.conversation.peerId };
-      const canSend = this._connected && Boolean(item.replyContext);
+      const canSend = this._connected && (item.hasLiveInbound || conversation.peerId === configured);
       return {
         id: recipientId(conversation), conversation,
         label: `QQ · ${conversation.peerId}${configured === conversation.peerId ? '（配置）' : ''}`,
         canSend, unreadCount: item.unreadCount,
         reason: canSend ? undefined : !this._connected ? 'QQ Bot 尚未连接'
-          : '暂无可用被动回复额度，请让此联系人给机器人发送一条新消息',
+          : '仅有导入记录，请先让此联系人给机器人发送一条消息',
       };
     });
     return { accountId, recipients, totalUnreadCount, reason: recipients.length ? undefined : '请先在 QQ 中给机器人发送一条消息' };
@@ -663,9 +663,6 @@ export class QqBotClient extends vscode.Disposable {
         throw new FileSendError('QQ 收件人快照无效，请重新选择收件人');
       }
       await this.assertTargetAccount(frozen);
-      if (!await this.db.peekQqReply(this.replyOptions(frozen.accountId, frozen.peerId))) {
-        throw new FileSendError('此 QQ 联系人的被动回复额度已用尽或过期，请等待对方的新消息');
-      }
       return frozen;
     }
     // Legacy direct callers retain automatic routing. The production provider
@@ -712,10 +709,10 @@ export class QqBotClient extends vscode.Disposable {
         body.msg_id = reply.messageId;
         body.msg_seq = reply.sequence;
       } else {
-        await this.applyRecentPassiveReply(openId, body, frozen, Boolean(target));
+        await this.applyRecentPassiveReply(openId, body, frozen);
       }
     } else {
-      await this.applyRecentPassiveReply(openId, body, frozen, Boolean(target));
+      await this.applyRecentPassiveReply(openId, body, frozen);
     }
     if (replyTo?.referenceId) {
       body.message_reference = { message_id: replyTo.referenceId };
@@ -778,7 +775,7 @@ export class QqBotClient extends vscode.Disposable {
         msg_type: 7,
         media: { file_info: fileInfo },
       };
-      await this.applyRecentPassiveReply(openId, sendBody, frozen, Boolean(target));
+      await this.applyRecentPassiveReply(openId, sendBody, frozen);
       log.info('[QQ Send] sending image message', {
         operationId,
         openId,
@@ -858,7 +855,7 @@ export class QqBotClient extends vscode.Disposable {
       });
       const fileInfo = await this.uploadMedia(openId, file, fileName, 4, operationId, frozen);
       const sendBody: Record<string, unknown> = { msg_type: 7, media: { file_info: fileInfo } };
-      await this.applyRecentPassiveReply(openId, sendBody, frozen, Boolean(target));
+      await this.applyRecentPassiveReply(openId, sendBody, frozen);
       // The upload uses srv_send_msg=false, so failures above cannot have sent a chat message.
       // From this boundary a timeout or persistence error may follow an accepted message.
       sendStarted = true;
@@ -1198,13 +1195,10 @@ export class QqBotClient extends vscode.Disposable {
   }
 
   /** Prefer a recent passive reply, avoiding proactive-message restrictions. */
-  private async applyRecentPassiveReply(openId: string, body: Record<string, unknown>, target?: SendTarget, requirePassive = false): Promise<void> {
+  private async applyRecentPassiveReply(openId: string, body: Record<string, unknown>, target?: SendTarget): Promise<void> {
     const reply = await this.reserveReply(openId, undefined, target);
     if (!reply) {
-      if (requirePassive) throw new FileSendError('此 QQ 联系人的被动回复额度已用尽或过期，请等待对方的新消息');
-      log.warn('[QQ Send] no usable passive reply context; falling back to proactive mode', {
-        openId, hint: '请在 QQ 中给机器人发送一条新消息以获得新的被动回复额度',
-      });
+      log.info('[QQ Send] no usable passive reply context; sending proactively', { openId });
       return;
     }
     body.msg_id = reply.messageId;

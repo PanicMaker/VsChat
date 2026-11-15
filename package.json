@@ -118,7 +118,7 @@
         "vschat.qqUserOpenId": {
           "type": "string",
           "default": "",
-          "description": "Optional QQ OpenID candidate shown in the recipient selector. Select it explicitly; a usable passive reply context is required. This setting does not grant proactive-send permission or automatically change the current recipient."
+          "description": "Optional QQ OpenID candidate shown in the recipient selector. Select it explicitly to send. Without a usable passive reply context, VsChat attempts a proactive message. This setting does not grant proactive-send permission or automatically change the current recipient."
         },
         "vschat.barkUrl": {
           "type": "string",

@@ -2532,17 +2532,17 @@ test('image-only attachment returns focus and follows Enter or Cmd+Enter without
   }
 });
 
-test('image-only shortcut and button both respect expired recipient quota with a visible explanation', () => {
+test('image-only shortcut and button both respect disconnected recipient status with a visible explanation', () => {
   const ui = webview();
   manageRecipients(ui);
   chooseRecipient(ui, 'alice');
   manageRecipients(ui, recipientOptions.map(option => option.id === 'alice'
-    ? { ...option, canSend: false, reason: '暂无可用被动回复额度，请让此联系人给机器人发送一条新消息' } : option));
+    ? { ...option, canSend: false, reason: 'QQ Bot 尚未连接' } : option));
   const file = { type: 'image/png', size: 3, name: 'fixture.png', data: 'data:image/png;base64,YWJj' };
   ui.dropFiles([file]);
   assert.equal(ui.element('send-btn').disabled, true);
-  assert.match(ui.element('send-btn').title, /被动回复额度/);
-  assert.match(ui.element('send-status').textContent, /被动回复额度/);
+  assert.match(ui.element('send-btn').title, /尚未连接/);
+  assert.match(ui.element('send-status').textContent, /尚未连接/);
   assert.equal(ui.element('send-feedback').classList.contains('hidden'), false);
   ui.element('text-input').events.keydown({ key: 'Enter', preventDefault() {} });
   ui.element('send-btn').click();
