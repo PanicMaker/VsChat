@@ -609,6 +609,18 @@ test('duplicate and updated shared messages merge by ID without double counting 
   assert.match(ui.element('new-messages').textContent, /3 条/);
 });
 
+test('returning after a hidden burst follows the latest only if already following before hide', () => {
+  for (const readingHistory of [false, true]) {
+    const ui = webview(), container = ui.element('chat-container');
+    sync(ui, { reset: true, messages: Array.from({ length: 20 }, (_, i) => message(i + 1)) });
+    if (readingHistory) { container.scrollTop = 35; container.events.scroll({}); }
+    ui.setHidden(true);
+    sync(ui, { messages: Array.from({ length: 12 }, (_, i) => message(i + 21)), unreadCount: 12 });
+    ui.setHidden(false);
+    assert.equal(container.scrollTop, readingHistory ? 35 : container.scrollHeight - container.clientHeight);
+  }
+});
+
 test('shared reads require host focus, document visibility and a visible chat at the latest message', () => {
   const ui = webview();
   sync(ui, { reset: true, messages: [message(7)], unreadCount: 1 });

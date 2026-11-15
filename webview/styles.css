@@ -952,7 +952,7 @@ body.search-open #new-messages, body.data-open #new-messages { visibility: hidde
 
 /* A full-width composer stays usable in a narrow VS Code sidebar. */
 body:is(.mode-chat, .mode-log, .mode-git) #input-bar { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 4px; padding: 6px 8px; }
-body:is(.mode-chat, .mode-log, .mode-git) #text-input { flex: none; width: 100%; min-height: 50px; max-height: min(160px, 25vh); padding: 6px 8px; }
+body:is(.mode-chat, .mode-log, .mode-git) #text-input { flex: none; width: 100%; min-height: 32px; max-height: min(160px, 25vh); padding: 4px 8px; }
 .composer-actions { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .composer-spacer { flex: 1; }
 body:is(.mode-chat, .mode-log, .mode-git) #emoji-btn,

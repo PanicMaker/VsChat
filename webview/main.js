@@ -114,6 +114,7 @@
   const restoredSelections = new Set();
   let unreadCount = 0;
   let followingMessages = true;
+  let resumeFollowing = false;
   let readingPosition = null;
   let preservedScrollTop = null;
   let lastSendLabel = '';
@@ -243,7 +244,7 @@
     textInput.style.height = 'auto';
     const border = (textInput.offsetHeight - textInput.clientHeight) || 0;
     const maxHeight = Math.min(160, Math.max(80, (window.innerHeight || 640) * 0.25));
-    textInput.style.height = Math.min(maxHeight, Math.max(50, textInput.scrollHeight + border)) + 'px';
+    textInput.style.height = Math.min(maxHeight, Math.max(32, textInput.scrollHeight + border)) + 'px';
   }
 
   function updateComposer() {
@@ -343,6 +344,7 @@
     lastReadSent = 0;
     unreadCount = 0;
     followingMessages = false;
+    resumeFollowing = false;
     readingPosition = null;
     preservedScrollTop = null;
     pendingReadingRestore = null;
@@ -1107,6 +1109,8 @@
       allMessages = [...merged.values()].sort((a, b) => a.id - b.id);
       initialHistoryLoaded = true;
       hasPartner = allMessages.length > 0;
+      // The unread button changes the viewport height; lay it out before scrolling.
+      updateUnread();
       if (message.reset || incoming.length) {
         showChat();
         if (appendOnly) {
@@ -1121,7 +1125,6 @@
           reRenderAll(position, follow);
         }
       }
-      updateUnread();
       if (recipientManaged) {
         const option = recipients.find(item => item.id === selectedRecipientId);
         if (option) option.unreadCount = unreadCount;
@@ -2294,9 +2297,12 @@
     // A previous report may have reached the host just after this panel hid.
     // Retrying after the next visibility transition is safe: DB reads are monotonic.
     lastReadSent = sharedReadThroughId;
-    if (!document.hidden) {
+    if (document.hidden) {
+      resumeFollowing = followingMessages;
+    } else {
       postScoped({ command: 'requestSync' });
-      if (isNearBottom()) scrollToBottom();
+      if (!searchOpen && !dataOpen && (resumeFollowing || isNearBottom())) scrollToBottom();
+      resumeFollowing = false;
     }
   });
   window.addEventListener('focus', () => {

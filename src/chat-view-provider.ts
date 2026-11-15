@@ -837,7 +837,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <button id="quote-cancel" title="取消引用">&times;</button>
           </div>
           <input type="file" id="file-input" class="hidden">
-          <textarea id="text-input" rows="2" aria-label="消息内容" title="Enter 发送，Shift+Enter 换行" placeholder="Type a message..."></textarea>
+          <textarea id="text-input" rows="1" aria-label="消息内容" title="Enter 发送，Shift+Enter 换行" placeholder="Type a message..."></textarea>
           <div class="composer-actions">
             <button id="emoji-btn" type="button" title="插入表情" aria-label="插入表情">😊</button>
             <button id="attach-btn" type="button" title="添加图片或文件" aria-label="添加图片或文件">📎</button>
